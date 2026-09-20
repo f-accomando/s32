@@ -808,6 +808,44 @@ try:
 finally:
     _ncl.LanBrowser = _orig_LanBrowser
 
+# ---------------------------------------------------------------
+# Test 16: main() non crasha con un traceback grezzo se la
+# connessione di rete fallisce (es. "getaddrinfo failed" per un IP
+# non valido/non risolvibile con --netplay-join) - segnalato
+# dall'utente testando host e client sullo stesso PC. Un errore di
+# rete termina con un messaggio chiaro (SystemExit(1)), MAI
+# arrivando a run_direct().
+# ---------------------------------------------------------------
+import sys as _sys_main
+
+_orig_argv_main = _sys_main.argv
+_orig_start_client_main = launcher.start_netcode_client
+_orig_run_direct_main = launcher.run_direct
+
+def _fake_start_client_che_fallisce(ip, port):
+    raise OSError("[Errno -2] Name or service not known")
+
+_run_direct_mai_chiamato = []
+
+def _run_direct_non_dovrebbe_essere_chiamato(*a, **k):
+    _run_direct_mai_chiamato.append((a, k))
+    return False
+
+_sys_main.argv = ['launcher.py', 'carts/fake/game.py', '--netplay-join', 'indirizzo.non.valido', '42420']
+launcher.start_netcode_client = _fake_start_client_che_fallisce
+launcher.run_direct = _run_direct_non_dovrebbe_essere_chiamato
+try:
+    try:
+        launcher.main()
+        check("main(): un errore di rete termina con SystemExit", "nessun errore", "SystemExit")
+    except SystemExit as exc:
+        check("main(): un errore di rete termina con SystemExit(1)", exc.code, 1)
+    check("main(): run_direct MAI chiamato se la connessione fallisce", _run_direct_mai_chiamato, [])
+finally:
+    _sys_main.argv = _orig_argv_main
+    launcher.start_netcode_client = _orig_start_client_main
+    launcher.run_direct = _orig_run_direct_main
+
 print()
 if fails == 0:
     print("Tutti i test passati.")

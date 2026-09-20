@@ -57,6 +57,13 @@ piena, e la logica "aspetta tutti" vive in un punto solo.
 rispondere - su LAN con pochi giocatori è quasi sempre un
 non-problema.
 
+**Testare host e client sullo STESSO PC**: usa sempre `127.0.0.1`
+(loopback) come IP - funziona SEMPRE, a differenza della scoperta
+automatica via broadcast (sezione 3) che su una singola macchina può
+essere bloccata da firewall/VPN pur essendo tecnicamente sullo stesso
+host. Il form "Unisciti a partita" del menu OS precompila già
+`127.0.0.1` per questo motivo.
+
 ---
 
 ## 3. Cosa è implementato
@@ -78,6 +85,12 @@ non-problema.
   resta come ripiego (rete che blocca il broadcast, o IP/porta gia'
   noti). Da riga di comando (`--netplay-join`) l'IP va ancora dato a
   mano - la scoperta automatica e' cablata solo nel menu OS per ora.
+  Un IP non valido/non risolvibile (`socket.gaierror`, tipicamente
+  "getaddrinfo failed") non fa piu' crashare ne' il menu ne' la CLI -
+  entrambi mostrano un messaggio chiaro invece di un traceback grezzo
+  (`main()` in `launcher.py` e `run_os_menu()` in `os_menu.py`
+  catturano `(ValueError, TimeoutError, OSError)` attorno a
+  `start_netcode_host`/`start_netcode_client`).
 
 ### `s32/cpu.py`
 

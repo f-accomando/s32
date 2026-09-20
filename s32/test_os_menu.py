@@ -423,16 +423,15 @@ try:
         [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_DOWN)],
         [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_DOWN)],                  # mode: -> "Unisciti a partita in rete"
         [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RETURN)],               # mode: conferma -> scansione vuota -> form manuale 'join'
-        [_FakeEventOm(_pygame_om.KEYDOWN, key=999, unicode='9')],                  # digita un carattere nel campo IP
-        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RETURN)],               # join: conferma (porta di default 42420)
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RETURN)],               # join: conferma SENZA digitare nulla (usa il default precompilato)
         [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_ESCAPE)],               # torna al menu poi esci
     ])
     _run_direct_returns.append(False)
 
     _os_menu_om.run_os_menu()
 
-    check("run_os_menu 'Unisciti' (nessun host trovato): ripiega sul form manuale con l'IP digitato",
-          _client_calls, [('9', 42420)])
+    check("run_os_menu 'Unisciti' (nessun host trovato): il form manuale e' precompilato con 127.0.0.1 (stesso PC)",
+          _client_calls, [('127.0.0.1', 42420)])
 finally:
     _launcher_om.run_direct = _orig_run_direct_om
     _launcher_om.discover_netcode_hosts = _orig_discover_om
