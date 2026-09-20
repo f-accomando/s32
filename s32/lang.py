@@ -25,13 +25,12 @@ S32 non ha ancora un equivalente, la VRAM piu' grande apre altre
 strade non ancora decise). Verranno aggiunte quando quel meccanismo
 sara' progettato per S32, non prima.
 
-peek(indirizzo) - AGGIUNTO per il multiplayer locale (vedi
-carts/barebone_p2p/): la controparte in LETTURA di poke(), che esisteva
-gia' solo in scrittura. Serve perche' l'input dei giocatori 2-4 vive in
-normali celle di memoria (PORT_INPUT_P2/P3/P4 in cpu.py), non dietro un
-opcode dedicato come input() - senza peek() non c'era modo di leggerle
-da ConsoleLang. Stesso vincolo di poke(): indirizzo LETTERALE, niente
-indirizzamento indicizzato (la CPU non ce l'ha).
+input(N) - AGGIUNTO per il multiplayer locale (vedi
+s32/netcode_lockstep.py e carts/barebone_p2p/): N e' l'indice del
+giocatore (0 = locale/tastiera, invariato; 1-7 = gli altri, letti da
+EXTRA_INPUT_PORTS in cpu.py). input() senza argomento resta
+equivalente a input(0), quindi ogni cartuccia esistente continua a
+funzionare invariata.
 """
 
 import re
@@ -55,7 +54,7 @@ TOKEN_RE = re.compile('|'.join(f'(?P<{n}>{p})' for n, p in TOKEN_SPEC))
 
 KEYWORDS = {'var', 'state', 'if', 'else', 'func', 'call', 'return', 'input',
             'regx', 'regy', 'clamp_x', 'clamp_y', 'write_oam', 'halt', 'poke',
-            'peek', 'select_stage', 'set_scroll', 'play_sound'}
+            'select_stage', 'set_scroll', 'play_sound'}
 
 
 def tokenize(src):
@@ -237,22 +236,19 @@ class Parser:
             return ('num', int(val, 0))
         if val == 'input':
             self.expect('(')
+            idx = 0
+            if self.peek()[0] == 'NUMBER':
+                _, num_val = self.next()
+                idx = int(num_val, 0)
             self.expect(')')
-            return ('input',)
+            if not (0 <= idx <= 7):
+                raise SyntaxError(
+                    f'input({idx}): indice giocatore fuori range (0-7)')
+            return ('input', idx)
         if val == 'regx':
             return ('regx',)
         if val == 'regy':
             return ('regy',)
-        if val == 'peek':
-            self.expect('(')
-            if self.peek()[0] != 'NUMBER':
-                raise SyntaxError(
-                    'peek() richiede un indirizzo LETTERALE come argomento '
-                    '(la CPU non ha indirizzamento indicizzato - vedi doc_asm.md)'
-                )
-            addr = int(self.next()[1], 0)
-            self.expect(')')
-            return ('peek', addr)
         if kind == 'IDENT':
             return ('var_ref', val)
         raise SyntaxError(f'Espressione inattesa: {val!r}')
@@ -297,15 +293,14 @@ def describe_expr(expr):
     if tag == 'num':
         return str(expr[1])
     if tag == 'input':
-        return 'input()'
+        idx = expr[1]
+        return 'input()' if idx == 0 else f'input({idx})'
     if tag == 'regx':
         return 'regx'
     if tag == 'regy':
         return 'regy'
     if tag == 'var_ref':
         return expr[1]
-    if tag == 'peek':
-        return f'peek({expr[1]})'
     if tag == 'binop':
         return f'{describe_expr(expr[2])} {expr[1]} {describe_expr(expr[3])}'
     if tag == 'lt':
@@ -394,7 +389,7 @@ class CodeGen:
             return ('imm', node[1])
         if node[0] == 'var_ref':
             return ('addr', self.var_addr(node[1]))
-        if node[0] in ('regx', 'regy', 'input', 'peek'):
+        if node[0] in ('regx', 'regy', 'input'):
             if not hasattr(self, '_rhs_temp_addr'):
                 self._rhs_temp_addr = self.alloc_var('__rhs_temp')
             self.gen_expr(node)
@@ -428,15 +423,16 @@ class CodeGen:
         if tag == 'num':
             self.emit(f'LDA #{expr[1]}')
         elif tag == 'input':
-            self.emit('IN')
+            idx = expr[1]
+            from cpu import PORT_INPUT, EXTRA_INPUT_PORTS
+            port = PORT_INPUT if idx == 0 else EXTRA_INPUT_PORTS[idx - 1]
+            self.emit(f'LDA {port}')
         elif tag == 'regx':
             self.emit('TXA')  # A = X
         elif tag == 'regy':
             self.emit('TYA')  # A = Y
         elif tag == 'var_ref':
             self.emit(f'LDA {self.var_addr(expr[1])}')
-        elif tag == 'peek':
-            self.emit(f'LDA {expr[1]}')
         elif tag == 'binop':
             op, left, right = expr[1], expr[2], expr[3]
             kind, val = self.resolve_rhs(right)

@@ -1,31 +1,34 @@
 """
 game.py - cartuccia BAREBONE_P2P, clone di carts/barebone/ con il
-multiplayer locale (fino a 4 giocatori sulla stessa LAN/WiFi, vedi
-s32/netplay.py e doc_networking.md per il design di rete).
+multiplayer locale in rete (vedi s32/netcode_lockstep.py e
+doc_networking.md per il design completo - lockstep host-relay,
+fino a 8 giocatori, gia' agganciato a s32/launcher.py tramite i flag
+--netplay-host/--netplay-join).
 
 Stessa convenzione single-file di barebone: UN SOLO file Python (piu'
 lo spritesheet font_spritesheet.png) - niente cart.py/cart_info.py/
 _shared.
 
 Differenza rispetto a barebone: QUATTRO avatar invece di uno, ognuno
-mosso dall'input del proprio slot:
-  - giocatore 1 (locale, tastiera) -> input()            (PORT_INPUT)
-  - giocatore 2 (rete)             -> peek(0x042005)      (PORT_INPUT_P2)
-  - giocatore 3 (rete)             -> peek(0x042007)      (PORT_INPUT_P3)
-  - giocatore 4 (rete)             -> peek(0x042009)      (PORT_INPUT_P4)
+mosso dall'input del proprio slot tramite ConsoleLang input(N):
+  - giocatore 1 -> input(0)  (= input(), il locale su ogni istanza)
+  - giocatore 2 -> input(1)
+  - giocatore 3 -> input(2)
+  - giocatore 4 -> input(3)
 
 Questa cartuccia NON apre lei stessa le connessioni di rete - come il
 resto della CPU S32, non sa nulla dell'esistenza della rete: legge
-solo 4 byte di input da 4 indirizzi fissi. E' compito del chiamante
-(vedi s32/netplay.py + l'integrazione nel launcher, prossimo step)
-procurarsi l'input dei giocatori 2-4 via rete e scriverlo in quelle
-celle PRIMA di ogni cpu.run() - esattamente come gia' fa per il
-giocatore 1 con la tastiera. Separazione gia' vista altrove nel
-motore: ppu.py non sa nulla di pygame, cpu.py non sa nulla di audio.
+solo 4 porte di input fisse. E' il launcher (vedi
+_run_pygame_loop/netcode_session in launcher.py) a procurarsi
+l'input degli altri giocatori via LockstepHost/LockstepClient e
+passarlo come extra_inputs a cpu.run() prima di ogni frame -
+esattamente come gia' fa per il giocatore locale con la tastiera.
+Separazione gia' vista altrove nel motore: ppu.py non sa nulla di
+pygame, cpu.py non sa nulla di audio.
 
-Per provarla SENZA rete (un solo processo, sviluppo/debug): vedi
-test_barebone_p2p.py - lancia il ROM passando input_p2/p3/p4 a
-cpu.run() direttamente, nessun socket coinvolto.
+Per provarla in rete:
+  host:   python3 launcher.py carts/barebone_p2p/game.py --netplay-host 42420 2
+  client: python3 launcher.py carts/barebone_p2p/game.py --netplay-join <ip host> 42420
 """
 
 import os
@@ -57,25 +60,25 @@ state p3y = 160
 state p4x = 384
 state p4y = 160
 
-if (input() & 1) { p1y = p1y - 3 }
-if (input() & 2) { p1y = p1y + 3 }
-if (input() & 4) { p1x = p1x - 3 }
-if (input() & 8) { p1x = p1x + 3 }
+if (input(0) & 1) { p1y = p1y - 3 }
+if (input(0) & 2) { p1y = p1y + 3 }
+if (input(0) & 4) { p1x = p1x - 3 }
+if (input(0) & 8) { p1x = p1x + 3 }
 
-if (peek(0x042005) & 1) { p2y = p2y - 3 }
-if (peek(0x042005) & 2) { p2y = p2y + 3 }
-if (peek(0x042005) & 4) { p2x = p2x - 3 }
-if (peek(0x042005) & 8) { p2x = p2x + 3 }
+if (input(1) & 1) { p2y = p2y - 3 }
+if (input(1) & 2) { p2y = p2y + 3 }
+if (input(1) & 4) { p2x = p2x - 3 }
+if (input(1) & 8) { p2x = p2x + 3 }
 
-if (peek(0x042007) & 1) { p3y = p3y - 3 }
-if (peek(0x042007) & 2) { p3y = p3y + 3 }
-if (peek(0x042007) & 4) { p3x = p3x - 3 }
-if (peek(0x042007) & 8) { p3x = p3x + 3 }
+if (input(2) & 1) { p3y = p3y - 3 }
+if (input(2) & 2) { p3y = p3y + 3 }
+if (input(2) & 4) { p3x = p3x - 3 }
+if (input(2) & 8) { p3x = p3x + 3 }
 
-if (peek(0x042009) & 1) { p4y = p4y - 3 }
-if (peek(0x042009) & 2) { p4y = p4y + 3 }
-if (peek(0x042009) & 4) { p4x = p4x - 3 }
-if (peek(0x042009) & 8) { p4x = p4x + 3 }
+if (input(3) & 1) { p4y = p4y - 3 }
+if (input(3) & 2) { p4y = p4y + 3 }
+if (input(3) & 4) { p4x = p4x - 3 }
+if (input(3) & 8) { p4x = p4x + 3 }
 
 regx = p1x
 regy = p1y

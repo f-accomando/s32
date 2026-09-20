@@ -101,17 +101,29 @@ check("mono_to_stereo: ogni campione duplicato su L e R",
       vals_stereo, (100, 100, -200, -200, 300, 300))
 
 # ---------------------------------------------------------------
-# 5. Banco suoni: tutti gli ID presenti e non vuoti
+# 5. Banco suoni DI ADVENTURE: vive nella cartuccia
+# (carts/_shared/sound_bank.py), non nel modulo audio della console -
+# audio.py fornisce solo i generatori di forma d'onda generici.
 # ---------------------------------------------------------------
-bank = audio.build_sound_bank()
-attesi = {audio.SND_ATTACK, audio.SND_HURT, audio.SND_ENEMY_HIT,
-          audio.SND_SHOOT, audio.SND_STAIRS, audio.SND_GATE,
-          audio.SND_BOSS_HIT, audio.SND_BOSS_DIE, audio.SND_DEFEAT}
-check("build_sound_bank: contiene tutti gli ID dichiarati",
+import sys as _sys
+import os as _os
+_sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), '..', 'carts', '_shared'))
+import sound_bank
+
+check("audio.py: NON contiene piu' gli ID suono di Adventure (spostati nella cartuccia)",
+      hasattr(audio, 'SND_ATTACK'), False)
+check("audio.py: NON contiene piu' build_sound_bank (spostato nella cartuccia)",
+      hasattr(audio, 'build_sound_bank'), False)
+
+bank = sound_bank.build_sound_bank()
+attesi = {sound_bank.SND_ATTACK, sound_bank.SND_HURT, sound_bank.SND_ENEMY_HIT,
+          sound_bank.SND_SHOOT, sound_bank.SND_STAIRS, sound_bank.SND_GATE,
+          sound_bank.SND_BOSS_HIT, sound_bank.SND_BOSS_DIE, sound_bank.SND_DEFEAT}
+check("sound_bank.build_sound_bank: contiene tutti gli ID dichiarati",
       set(bank.keys()), attesi)
-check("build_sound_bank: nessun suono vuoto",
+check("sound_bank.build_sound_bank: nessun suono vuoto",
       all(len(v) > 0 for v in bank.values()), True)
-check("build_sound_bank: campioni pari (16 bit)",
+check("sound_bank.build_sound_bank: campioni pari (16 bit)",
       all(len(v) % 2 == 0 for v in bank.values()), True)
 
 # ---------------------------------------------------------------

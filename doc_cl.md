@@ -137,31 +137,26 @@ di questa CPU supporta l'indirizzamento indicizzato.
 
 ---
 
-## 7bis. peek() — la controparte in lettura, per il multiplayer
+## 7bis. input(N) — multiplayer: leggere gli altri giocatori
 
-`poke()` scrive un indirizzo letterale; `peek()` lo **legge**, come
-espressione utilizzabile ovunque serva un valore:
-
-```
-var v = peek(0x042005)         // legge l'indirizzo dato
-if (peek(0x042005) & 1) { ... } // o direttamente dentro una condizione
-```
-
-Stesso vincolo di `poke()`: l'indirizzo dev'essere un numero letterale,
-non una variabile.
-
-A cosa serve in pratica: l'input dei giocatori 2-4 nel multiplayer
-locale (vedi `doc_networking.md` e `carts/barebone_p2p/`) non ha un
-opcode dedicato come `input()` (quello resta il giocatore 1, tastiera
-locale) — vive in normali celle di memoria (`PORT_INPUT_P2/P3/P4` in
-`cpu.py`, indirizzi `0x042005`/`0x042007`/`0x042009`), scritte dal
-launcher prima di ogni frame esattamente come `PORT_INPUT`. `peek()` è
-il modo con cui ConsoleLang le legge:
+`input()` senza argomenti legge sempre il giocatore locale (indice 0)
+— invariato. Per il multiplayer in rete (vedi `doc_networking.md` e
+`carts/barebone_p2p/`), `input(N)` legge l'input del giocatore di
+indice N (0-7):
 
 ```
-if (peek(0x042005) & 1) { p2y = p2y - 3 }   // UP del giocatore 2
-if (peek(0x042005) & 8) { p2x = p2x + 3 }   // RIGHT del giocatore 2
+var mio = input()        // equivalente a input(0)
+var p2  = input(1)       // giocatore 2
+if (input(2) & 1) { ... } // giocatore 3, direttamente in una condizione
 ```
+
+N deve stare tra 0 e 7 (fino a 8 giocatori) — un indice fuori range è
+un `SyntaxError` a tempo di compilazione, non un comportamento
+indefinito a runtime. Sotto il cofano, `input(N)` per N>0 legge da una
+delle porte `EXTRA_INPUT_PORTS` (`cpu.py`) — celle di memoria che il
+launcher scrive prima di ogni frame con l'input ricevuto in rete
+dagli altri giocatori (vedi `s32/netcode_lockstep.py` e
+`doc_networking.md` per come ci arriva).
 
 Vedi `carts/barebone_p2p/game.py` per l'esempio completo con 4
 giocatori.
