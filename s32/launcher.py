@@ -374,8 +374,16 @@ class GpuRenderer:
         self.pygame = pygame
         self.renderer = renderer
         self.video = _sdl2_video(pygame)
-        self.bg_surface = None       # CPU-side, stesso ruolo di sempre
-        self.bg_texture = None       # GPU-side, aggiornata da bg_surface
+        self.bg_texture = None       # GPU-side, l'unica sorgente di verita' -
+                                      # niente piu' una Surface CPU parallela
+                                      # da tenere sincronizzata (vedi render())
+        self.bg_texture_scratch = None  # seconda texture "target", usata a
+                                         # turno con bg_texture per lo scroll
+                                         # GPU-side (ping-pong, vedi render())
+        self.bg_strip_texture = None    # texture riutilizzata ogni frame di
+                                         # scroll per caricare SOLO la striscia
+                                         # nuova (poche righe, non l'intero
+                                         # schermo) - vedi render()
         self.bg_stage = None
         self.bg_scroll_x = None
         self.bg_scroll_y = None
@@ -467,31 +475,51 @@ class GpuRenderer:
             # gli stessi sprite (giocatore, cuori) rientrando in una
             # stanza gia' visitata.
 
-        full_rebuild = self.bg_surface is None or current_stage != self.bg_stage
-        bg_changed = full_rebuild
-        # cosa spingere sulla texture GPU in questo frame -
-        # (surface_da_caricare, area_rect_o_None). None per l'area
-        # significa "l'intera texture" (Texture.update lo interpreta
-        # cosi'). SEMPRE l'intero bg_surface quando qualcosa cambia
-        # (rebuild o scroll incrementale) - una versione precedente
-        # provava a spingere solo la striscia nuova durante lo scroll,
-        # ma la texture GPU non ha un equivalente di Surface.scroll()
-        # (che sposta FISICAMENTE i pixel gia' disegnati): il resto
-        # del contenuto restava congelato alla vecchia posizione,
-        # bug trovato dall'utente giocando davvero ("il personaggio
-        # sembrava stazionario e i nemici oltrepassavano il muro" -
-        # vedi il commento completo piu' sotto, nel ramo di scroll).
-        dirty_update = None
+        full_rebuild = self.bg_texture is None or current_stage != self.bg_stage
+        gpu_shift = None            # (dy, strip_surf, strip_y, strip_h): scroll GPU-side
+        full_update_surface = None  # Surface COMPLETA da caricare (primo frame / rebuild)
 
         if not full_rebuild and (scroll_x != self.bg_scroll_x or scroll_y != self.bg_scroll_y):
             dx = scroll_x - self.bg_scroll_x
             dy = scroll_y - self.bg_scroll_y
             if dx == 0 and 0 < abs(dy) < SCREEN_H_PX:
-                # stessa identica logica di IncrementalRenderer - vedi
-                # li' per i commenti completi sul perche'
+                # SCROLL GPU-SIDE VERO (issue #10): la strada scartata
+                # in precedenza per mancanza di modo di verificarla su
+                # hardware reale. Storia completa:
+                #
+                # v1: si aggiornava sulla texture SOLO l'area della
+                # striscia nuova (Texture.update(area=striscia),
+                # ~1.5ms) - veloce ma visivamente rotto: una texture
+                # GPU non ha un equivalente di Surface.scroll() (che
+                # SPOSTA FISICAMENTE i pixel gia' disegnati in una
+                # Surface CPU) - il resto del contenuto gia' caricato
+                # restava congelato alla vecchia posizione mentre gli
+                # sprite si muovevano. BUG TROVATO DALL'UTENTE GIOCANDO
+                # DAVVERO: "il personaggio sembrava stazionario e i
+                # nemici oltrepassavano il muro".
+                #
+                # v2 (fix precedente): si spingeva sempre l'INTERO
+                # bg_surface (480x320) sulla texture ad ogni frame di
+                # scroll - corretto, ma il costo di un caricamento
+                # pieno CPU->GPU ad ogni frame (~36ms misurato su Pi 1
+                # reale) mangiava quasi tutto il guadagno che la GPU
+                # avrebbe dato altrove.
+                #
+                # v3 (questa versione): la STESSA correttezza di v2
+                # (nessuna area che resta congelata: lo shift copre
+                # l'intera texture, la striscia nuova copre esattamente
+                # l'area che lo shift rivela, insieme le due coprono il
+                # 100% - identica matematica di
+                # self.bg_surface.scroll(0,-dy)+blit() gia' usata da
+                # IncrementalRenderer) MA senza il suo costo: invece di
+                # ricaricare tutto da una Surface CPU, spostiamo il
+                # contenuto GIA' in VRAM con un render-to-texture
+                # (disegnare la vecchia texture, shiftata, dentro una
+                # texture "target" - un'operazione GPU->GPU, mai un
+                # giro per la RAM) e carichiamo dalla CPU SOLO la
+                # striscia nuova (poche righe, non l'intero schermo -
+                # vedi bg_strip_texture piu' sotto).
                 t0 = time.perf_counter()
-                self.bg_surface.scroll(0, -dy)
-                t1 = time.perf_counter()
                 if dy > 0:
                     strip_h = dy
                     strip_y = SCREEN_H_PX - strip_h
@@ -500,43 +528,18 @@ class GpuRenderer:
                     strip_y = 0
                 strip_buf = render_background_window(vram, cgram, scroll_x, scroll_y, strip_y, strip_h,
                                                       blob_cache=self.tile_blob_cache)
-                t2 = time.perf_counter()
+                t1 = time.perf_counter()
                 strip_surf = pygame.image.frombuffer(bytes(strip_buf), (SCREEN_W_PX, strip_h), 'RGB')
-                self.bg_surface.blit(strip_surf, (0, strip_y))
-                t3 = time.perf_counter()
+                t2 = time.perf_counter()
+                gpu_shift = (dy, strip_surf, strip_y, strip_h)
                 self.bg_scroll_x = scroll_x
                 self.bg_scroll_y = scroll_y
-                bg_changed = True
-                # BUG TROVATO DALL'UTENTE GIOCANDO DAVVERO (non nei
-                # test): "il personaggio sembrava stazionario e i
-                # nemici oltrepassavano il muro". Causa: la texture
-                # GPU non ha un equivalente di Surface.scroll() - che
-                # SPOSTA FISICAMENTE i pixel gia' disegnati dentro la
-                # Surface CPU. Texture.update(area=striscia) scrive
-                # SOLO quella striscia in una posizione fissa; il resto
-                # del contenuto gia' caricato sulla GPU non si sposta
-                # mai, restando congelato alla vecchia posizione mentre
-                # gli sprite (ridisegnati ogni frame nella posizione
-                # vera) continuano a muoversi - da qui lo sfondo
-                # "fermo" e i nemici che sembrano attraversare i muri.
-                # Fix: spingiamo l'INTERO bg_surface (che e' comunque
-                # gia' corretto in CPU - scroll+patch della striscia
-                # sono gia' avvenuti sopra), non solo la striscia -
-                # sacrifica parte del guadagno di texture_update, ma
-                # la correttezza viene prima della velocita'. Uno
-                # scroll "sul serio" (shiftare anche il contenuto
-                # gia' caricato sulla GPU, via render-to-texture) e'
-                # possibile ma piu' complesso - non tentato ora senza
-                # poterlo verificare su hardware reale.
-                dirty_update = (self.bg_surface, None)
                 self.last_timing = {
-                    'surface_scroll': t1 - t0,
-                    'strip_compute': t2 - t1,
-                    'strip_blit': t3 - t2,
+                    'strip_compute': t1 - t0,
+                    'strip_surface': t2 - t1,
                 }
             else:
                 full_rebuild = True
-                bg_changed = True
 
         if full_rebuild:
             bg_buf = render_background(vram, cgram, scroll_x, scroll_y, blob_cache=self.tile_blob_cache)
@@ -545,29 +548,60 @@ class GpuRenderer:
             # (pygame.display.set_mode()), che in modalita' GPU non
             # esiste mai - usiamo una finestra dedicata via
             # _sdl2.video.Window. La Surface va bene cosi' com'e' per
-            # Texture.from_surface()/.update(). Bug trovato testando:
+            # Texture(...).update(). Bug trovato testando:
             # "pygame.error: Parameter 'surface' is invalid".
-            self.bg_surface = pygame.image.frombuffer(bytes(bg_buf), (SCREEN_W_PX, SCREEN_H_PX), 'RGB')
+            full_update_surface = pygame.image.frombuffer(bytes(bg_buf), (SCREEN_W_PX, SCREEN_H_PX), 'RGB')
             self.bg_stage = current_stage
             self.bg_scroll_x = scroll_x
             self.bg_scroll_y = scroll_y
-            dirty_update = (self.bg_surface, None)  # rebuild completo: l'intera texture
 
-        # -- spinge SOLO la porzione cambiata dentro la texture GPU -
-        # non l'intero sfondo se e' cambiata solo una striscia (vedi
-        # sopra) --
+        t3 = time.perf_counter()
+        if gpu_shift is not None:
+            dy, strip_surf, strip_y, strip_h = gpu_shift
+            # bg_texture_scratch e bg_strip_texture sono create UNA
+            # SOLA VOLTA (al primo scroll) e riusate per sempre - la
+            # stessa filosofia gia' usata per l'atlas sprite: creare
+            # una texture GPU non e' gratis, quindi mai farlo ogni
+            # frame quando si puo' riusare la stessa. bg_texture_scratch
+            # DEVE essere creata con target=True fin dall'inizio (mai
+            # da Texture.from_surface(), che non garantisce una
+            # texture utilizzabile come target) - vedi anche
+            # bg_texture stesso, creato con target=True qui sotto per
+            # lo stesso motivo: nello scambio ping-pong ogni frame
+            # l'una prende il posto dell'altra, quindi ENTRAMBE devono
+            # poter fare da target in un frame di scroll futuro.
+            if self.bg_texture_scratch is None:
+                self.bg_texture_scratch = self.video.Texture(self.renderer, (SCREEN_W_PX, SCREEN_H_PX), target=True)
+            if self.bg_strip_texture is None:
+                self.bg_strip_texture = self.video.Texture(self.renderer, (SCREEN_W_PX, SCREEN_H_PX))
+            self.renderer.target = self.bg_texture_scratch
+            # 1) sposta il contenuto GIA' in VRAM (GPU->GPU, la vecchia
+            # texture per intero ma shiftata) - stessa direzione di
+            # Surface.scroll(0, -dy)
+            self.bg_texture.draw(dstrect=(0, -dy, SCREEN_W_PX, SCREEN_H_PX))
+            # 2) carica SOLO la striscia nuova (CPU->GPU, ma piccola -
+            # questo e' l'UNICO upload rimasto, proporzionale a
+            # strip_h non a SCREEN_H_PX) e disegnala esattamente
+            # nell'area che lo shift sopra ha lasciato scoperta
+            self.bg_strip_texture.update(strip_surf, area=(0, 0, SCREEN_W_PX, strip_h))
+            self.bg_strip_texture.draw(srcrect=(0, 0, SCREEN_W_PX, strip_h),
+                                        dstrect=(0, strip_y, SCREEN_W_PX, strip_h))
+            self.renderer.target = None
+            # ping-pong: la texture appena disegnata diventa quella
+            # "corrente", la vecchia corrente diventa lo scratch per
+            # il prossimo frame di scroll
+            self.bg_texture, self.bg_texture_scratch = self.bg_texture_scratch, self.bg_texture
+        elif self.bg_texture is None:
+            self.bg_texture = self.video.Texture(self.renderer, (SCREEN_W_PX, SCREEN_H_PX), target=True)
+            self.bg_texture.update(full_update_surface)
+        elif full_update_surface is not None:
+            self.bg_texture.update(full_update_surface)
         t4 = time.perf_counter()
-        if self.bg_texture is None:
-            self.bg_texture = self.video.Texture.from_surface(self.renderer, self.bg_surface)
-        elif dirty_update is not None:
-            surf_da_caricare, area = dirty_update
-            self.bg_texture.update(surf_da_caricare, area=area)
-        t5 = time.perf_counter()
         if self.last_timing is not None:
-            self.last_timing['texture_update'] = t5 - t4
+            self.last_timing['gpu_shift'] = t4 - t3
 
         # -- composizione: sempre l'intero frame, ogni frame. Con la
-        # GPU a ~2ms per un frame pieno (misurato, vedi test_gpu.py),
+        # GPU a ~2ms per un frame pieno (misurato, vedi test_launcher.py),
         # tracciare "dirty rect" per gli sprite non vale piu' la
         # complessita' che costava su Surface software --
         self.renderer.clear()
@@ -579,7 +613,7 @@ class GpuRenderer:
         self.renderer.present()
         t7 = time.perf_counter()
         if self.last_timing is not None:
-            self.last_timing['draw_sprites'] = t6 - t5
+            self.last_timing['draw_sprites'] = t6 - t4
             self.last_timing['present'] = t7 - t6
 
 
@@ -1244,8 +1278,10 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
                     parts = ' '.join(
                         f"{k.replace('scroll_', '')}={stats[k]/sn*1000:.1f}ms"
                         for k in ('scroll_surface_scroll', 'scroll_strip_compute',
-                                  'scroll_strip_blit', 'scroll_screen_blit', 'scroll_flip',
-                                  'scroll_texture_update', 'scroll_draw_sprites', 'scroll_present')
+                                  'scroll_strip_surface', 'scroll_strip_blit',
+                                  'scroll_screen_blit', 'scroll_flip',
+                                  'scroll_texture_update', 'scroll_gpu_shift',
+                                  'scroll_draw_sprites', 'scroll_present')
                         if k in stats
                     )
                     print(f"  [dettaglio scroll, {sn} frame in scroll] {parts}")
@@ -1298,8 +1334,10 @@ def _print_playtest_summary(phase_stats, renderer_mode, wall_seconds):
             parts = ' '.join(
                 f"{k.replace('scroll_', '')}={ps[k]/sn*1000:.2f}ms"
                 for k in ('scroll_surface_scroll', 'scroll_strip_compute',
-                          'scroll_strip_blit', 'scroll_screen_blit', 'scroll_flip',
-                          'scroll_texture_update', 'scroll_draw_sprites', 'scroll_present')
+                          'scroll_strip_surface', 'scroll_strip_blit',
+                          'scroll_screen_blit', 'scroll_flip',
+                          'scroll_texture_update', 'scroll_gpu_shift',
+                          'scroll_draw_sprites', 'scroll_present')
                 if k in ps
             )
             print(f"  -> dettaglio scroll ({sn} frame in scroll): {parts}")
