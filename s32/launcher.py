@@ -1110,9 +1110,27 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
         # uno disallineato tra le istanze. --
         extra_inputs = None
         if netcode_session is not None:
-            netcode_session.submit_local_input(frame_number, input_byte)
-            frame_inputs = netcode_session.get_frame_inputs(frame_number, timeout=0.25)
+            try:
+                netcode_session.submit_local_input(frame_number, input_byte)
+                frame_inputs = netcode_session.get_frame_inputs(frame_number, timeout=0.25)
+            except OSError as exc:
+                # una sessione di rete puo' fallire A META' PARTITA
+                # (non solo al momento di connettersi, gia' gestito da
+                # os_menu.py) - un socket che va in errore (rete
+                # caduta, host irraggiungibile) sollevava OSError qui
+                # SENZA che nessuno lo catturasse, facendo crashare
+                # l'intera applicazione con un traceback grezzo -
+                # segnalato dall'utente giocando davvero tra due reti
+                # diverse (molto piu' soggette a blip di rete di una
+                # LAN locale). Trattata come se l'utente avesse
+                # premuto ESC (quit_requested resta False): si torna
+                # al menu invece di chiudere tutto, vedi run_os_menu.
+                print(f"[netplay] connessione di rete persa ({exc}) - torno al menu")
+                running = False
+                continue
             if frame_inputs is None:
+                clock.tick(60)  # mai saltare il limitatore di framerate,
+                                 # nemmeno quando il frame viene scartato
                 continue
             input_byte = frame_inputs[local_player_index]
             extra_inputs = tuple(

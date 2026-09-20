@@ -1531,3 +1531,44 @@ altre liste, es. "Locale/Ospita/Unisciti", non hanno avatar).
 sanificazione, file corrotto/parziale; 8 in `test_os_menu.py` - flusso
 completo apri-profilo/digita/scegli-avatar/salva verificato fino a
 `start_netcode_host`, ESC annulla senza salvare). 400 test totali.
+
+## Due crash risolti, segnalati dall'utente in un test reale su due PC
+
+Stesso test (un PC di casa e uno di lavoro) ha fatto emergere, oltre
+ai sospetti di rete gia' in `doc_networking.md` (sezione 2bis, non
+risolvibili da codice - vedi li' l'ipotesi NAT/port-forwarding
+aggiunta per lo scenario "reti diverse"), due crash veri e propri
+nel codice, entrambi trovati e corretti.
+
+**Chiudere la finestra durante una partita poteva far crashare
+l'app**: alla fine di ogni partita, `os_menu.py` ridimensionava
+SEMPRE la finestra per tornare a disegnare il menu
+(`pygame.display.set_mode(...)`) PRIMA di controllare se l'utente
+aveva invece chiuso la finestra di gioco - chiamare `set_mode()` su
+una finestra gia' chiusa dall'utente e' un'operazione su una risorsa
+non piu' valida. I 4 punti che lanciano una partita (locale, ospita,
+unisciti via scoperta, unisciti manuale) duplicavano ognuno la stessa
+logica, quindi lo stesso bug. Accorpati in `_after_match()`
+(`os_menu.py`), che controlla la chiusura PRIMA di tutto e in tal
+caso chiama solo `pygame.quit()`, mai piu' `set_mode()`; la chiusura
+della sessione di rete e' anch'essa li', avvolta in `try/except
+OSError` (un socket gia' in errore non deve mai impedire di tornare
+al menu o di uscire).
+
+**Un errore di rete a META' PARTITA non veniva mai catturato**: solo
+il momento della connessione era gestito - una `OSError` sollevata
+DOPO, da `submit_local_input()`/`get_frame_inputs()` durante il game
+loop (`launcher.py`), risaliva non gestita fino a far crashare
+l'intera applicazione con un traceback grezzo. Scenario molto piu'
+frequente giocando tra due reti reali diverse (come nel test
+casa/lavoro dell'utente) che sulla stessa LAN. Corretto avvolgendo lo
+scambio di input di rete in `_run_pygame_loop` con `try/except
+OSError`: trattato come un ESC, si torna al menu invece di chiudere
+tutto. Approfittando della modifica, corretto anche un
+`clock.tick(60)` mancante sul ramo che salta un frame in attesa
+dell'input remoto.
+
+10 nuovi test (8 in `test_os_menu.py` per `_after_match()`; 2 in
+`test_launcher.py`, Test 13bis, con una sessione di rete finta che
+solleva `OSError` a meta' di una partita vera in playtest). 410 test
+totali. Dettagli completi in `doc_networking.md`, sezione 2ter.
