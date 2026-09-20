@@ -1846,3 +1846,35 @@ campionare con `srcrect` da una texture piu' grande costa
 significativamente di piu' che disegnare una texture dedicata piccola,
 e' probabilmente questa la causa mai considerata finora - non l'area,
 non l'alpha, non la cache, non lo sfondo.
+
+## Quarto giro: anche l'atlas/srcrect escluso - resta una sola differenza strutturale mai testata
+
+L'utente ha rilanciato `bench_gpu_draw.py` sulla Pi 1 vera: 7 draw da
+texture dedicata contro 7 draw con `srcrect` da un atlas 256x256
+differiscono solo dell'1% (dentro il rumore) - **anche questa causa
+e' esclusa**. Cinque ipotesi ormai smentite in quattro giri di dati
+reali (area disegnata, alpha blending, cache dell'atlas, sfondo,
+atlas/srcrect), e il divario resta intatto: il benchmark isolato
+resta sempre intorno a ~2ms per la sequenza "sfondo+7 sprite", contro
+`bg_draw`+`sprite_draws` = 0.12+12.4 = 12.5ms nel gioco vero (~6x).
+
+**Unica differenza strutturale rimasta tra lo script e il gioco vero,
+mai testata**: la finestra di `bench_gpu_draw.py` e' sempre creata
+`hidden=True` (per non far comparire una finestra durante uno script
+di misura) - il gioco vero ha SEMPRE una finestra visibile sullo
+schermo reale. Su Raspberry Pi con KMSDRM (nessun window manager,
+page-flip diretto verso l'hardware del display), una finestra
+nascosta potrebbe non attraversare mai il vero percorso di
+page-flip/vblank - rendendo OGNI misura fatta finora con questo
+script sistematicamente piu' ottimistica del costo reale su schermo,
+indipendentemente da cosa si sta disegnando.
+
+`bench_gpu_draw.py` ora include un confronto diretto A/B: la stessa
+identica sequenza "sfondo+7 sprite" ripetuta su due finestre distinte,
+una nascosta e una visibile, una dopo l'altra nella stessa esecuzione
+dello script (cosi' non e' confondibile con variazioni di carico/
+temperatura tra run separati). Se la finestra visibile risulta molto
+piu' costosa, e' probabilmente la spiegazione dell'intero divario
+rimasto - altrimenti bisognera' guardare oltre (es. con un profiler
+vero sulla Pi, `perf`/`vcgencmd`, non piu' indovinando variabili una
+alla volta).

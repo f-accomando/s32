@@ -37,24 +37,29 @@ per rispondere a tre domande concrete:
      (bg_draw=0.1ms, economico) ma proprio nel loop sprite
      (sprite_draws=12-14ms) - nonostante siano solo 3-7 tile per
      frame. Quattro ipotesi esaurite (area, alpha, cache, sfondo).
-  6. NUOVO - variabile mai testata finora: nei test 1-4 sopra il tile
-     e' sempre una texture DEDICATA 32x32. Il vero atlas sprite
-     (`sprite_atlas_texture` in GpuRenderer) e' invece una texture
-     GRANDE 256x256 (8x8 slot da 32x32, vedi ATLAS_COLS/
-     ATLAS_TILES_MAX in launcher.py) - ogni sprite viene disegnato con
-     `srcrect` che seleziona un sotto-rettangolo 32x32 DENTRO quella
-     texture piu' grande, non una texture a se stante. Questa funzione
-     confronta DIRETTAMENTE le due cose: N draw() da una texture
-     dedicata 32x32 contro N draw() con lo stesso srcrect da una
-     texture atlas 256x256 (stesso identico contenuto visivo,
-     costruzione IDENTICA a quella vera - Texture.from_surface() su
-     una Surface SRCALPHA 256x256) - se il campionamento con srcrect
-     da una texture piu' grande costa di piu', e' probabilmente questa
-     la causa mai testata finora.
+  6. Campionamento con srcrect da un atlas 256x256 - ESCLUSO da un
+     quarto giro di dati reali (-1%, dentro il rumore). Cinque
+     ipotesi ormai escluse (area, alpha, cache, atlas/srcrect, sfondo)
+     e il divario resta: ~2ms nel benchmark isolato contro
+     bg_draw+sprite_draws=12.5ms nel gioco vero (~6x).
+  7. NUOVO - unica differenza strutturale rimasta tra questo script e
+     il gioco vero, mai testata: la finestra qui e' sempre creata
+     NASCOSTA (`hidden=True`) - il gioco vero ha una finestra VISIBILE
+     sullo schermo reale. Su Raspberry Pi con KMSDRM (nessun window
+     manager, page-flip diretto verso il display), una finestra
+     nascosta potrebbe non attraversare mai il vero percorso di
+     page-flip/vblank verso l'hardware - rendendo ogni misura fatta
+     finora sistematicamente piu' ottimistica del vero costo su
+     schermo, qualunque cosa si disegni. Questa funzione ripete la
+     stessa identica sequenza "sfondo+7 sprite" su DUE finestre,
+     nascosta e visibile, una dopo l'altra nella stessa esecuzione,
+     per un confronto diretto A/B.
 
-Uso: python3 bench_gpu_draw.py  (lanciarlo SULLA Pi 1 vera - qui in
-sviluppo i numeri non sono comparabili, nessuna GPU reale disponibile
-in questo ambiente. Serve pygame-ce/pygame con supporto _sdl2.video).
+Uso: python3 bench_gpu_draw.py  (lanciarlo SULLA Pi 1 vera, CON UNO
+SCHERMO COLLEGATO - il test 7 apre una finestra visibile per qualche
+istante. Qui in sviluppo i numeri non sono comparabili, nessuna GPU
+reale disponibile in questo ambiente. Serve pygame-ce/pygame con
+supporto _sdl2.video).
 """
 import time
 import sys
@@ -265,8 +270,63 @@ def main():
     pygame.quit()
 
 
+def _misura_visibilita(hidden, n_iter=N_ITER):
+    """Ripete la sequenza 'sfondo+7 sprite' su una finestra nuova,
+    nascosta o visibile - vedi domanda 7 nel docstring del modulo.
+    Finestra e renderer separati da quelli di main(), per non
+    interferire con le misure sopra."""
+    win = video.Window("bench_gpu_draw (visibilita')", size=(480, 320), hidden=hidden)
+    renderer = video.Renderer(win, accelerated=1, vsync=False)
+
+    bg_surf = pygame.Surface((480, 320))
+    for y in range(0, 320, 32):
+        for x in range(0, 480, 32):
+            colore = (120, 90, 40) if (x // 32 + y // 32) % 2 == 0 else (140, 100, 50)
+            bg_surf.fill(colore, rect=(x, y, 32, 32))
+    bg_tex = video.Texture(renderer, (480, 320), target=True)
+    bg_tex.update(bg_surf)
+
+    tile_surf = pygame.Surface((32, 32), pygame.SRCALPHA)
+    tile_surf.fill((200, 80, 40, 255))
+    tile_tex = video.Texture.from_surface(renderer, tile_surf)
+
+    def _sfondo_piu_sprite():
+        renderer.clear()
+        bg_tex.draw(dstrect=(0, 0, 480, 320))
+        for i in range(7):
+            tile_tex.draw(dstrect=(i * 32, 0, 32, 32))
+        renderer.present()
+
+    etichetta = "NASCOSTA (hidden=True, come tutti i test sopra)" if hidden else "VISIBILE (come il gioco vero)"
+    ms = _timeit(f"[finestra {etichetta}] clear()+sfondo+7 sprite+present()", _sfondo_piu_sprite, n=n_iter)
+    win.destroy()
+    return ms
+
+
+def confronto_visibilita():
+    print()
+    print("=== DOMANDA 7: la finestra nascosta salta il vero costo del page-flip? ===")
+    ms_nascosta = _misura_visibilita(hidden=True)
+    ms_visibile = _misura_visibilita(hidden=False)
+    diff = ms_visibile - ms_nascosta
+    pct = (diff / ms_nascosta * 100) if ms_nascosta else 0
+    print(f"finestra nascosta: {ms_nascosta:.3f} ms   vs   finestra visibile: {ms_visibile:.3f} ms "
+          f"-> differenza {diff:+.3f} ms ({pct:+.0f}%)")
+    if diff > 1.0:
+        print("-> LA VISIBILITA' DELLA FINESTRA CONTA ECCOME: tutte le misure di questo script fatte finora "
+              "(finestra sempre nascosta) erano sistematicamente troppo ottimistiche - il vero costo su schermo "
+              "e' quello della finestra VISIBILE, molto piu' vicino ai 12-14ms osservati nel gioco vero.")
+    else:
+        print("-> Nessuna differenza significativa: la visibilita' della finestra non spiega il divario.")
+    print()
+    print("Incolla ANCHE questa sezione per l'analisi.")
+
+
 if __name__ == "__main__":
     if not hasattr(video, "Renderer"):
         print("pygame._sdl2.video.Renderer non disponibile - serve pygame-ce o pygame >= 2.1 con supporto GPU")
         sys.exit(1)
     main()
+    pygame.init()
+    confronto_visibilita()
+    pygame.quit()
