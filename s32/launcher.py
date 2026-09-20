@@ -1535,12 +1535,21 @@ def main():
         else:
             netcode_session = None
             local_player_index = 0
-            if flags['netplay_host_port'] is not None:
-                netcode_session, local_player_index = start_netcode_host(
-                    flags['netplay_host_port'], flags['netplay_host_players'])
-            elif flags['netplay_join_addr'] is not None:
-                ip, porta = flags['netplay_join_addr']
-                netcode_session, local_player_index = start_netcode_client(ip, porta)
+            try:
+                if flags['netplay_host_port'] is not None:
+                    netcode_session, local_player_index = start_netcode_host(
+                        flags['netplay_host_port'], flags['netplay_host_players'])
+                elif flags['netplay_join_addr'] is not None:
+                    ip, porta = flags['netplay_join_addr']
+                    netcode_session, local_player_index = start_netcode_client(ip, porta)
+            except (ValueError, TimeoutError, OSError) as exc:
+                # es. "getaddrinfo failed"/gaierror per un IP non valido
+                # o non risolvibile, porta gia' occupata, timeout di
+                # connessione - un messaggio chiaro invece di un
+                # traceback grezzo (os_menu.py gestisce lo stesso caso
+                # allo stesso modo, vedi run_os_menu)
+                print(f"[netplay] impossibile avviare la partita in rete: {exc}")
+                sys.exit(1)
 
             run_direct(path, kind, show_stats=flags['stats'], renderer_mode=flags['renderer'],
                        fullscreen=flags['fullscreen'], use_audio=flags['audio'], playtest=flags['playtest'],
@@ -1549,4 +1558,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except LauncherError as exc:
+        print(f"Errore: {exc}")
+        sys.exit(1)

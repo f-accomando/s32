@@ -275,8 +275,14 @@ def run_os_menu():
                     join_pick_menu.move_down()
                 elif event.key in (pygame.K_RETURN, pygame.K_j, pygame.K_SPACE):
                     if join_pick_menu.index == len(join_scan_results):
-                        # ultima voce: "inserisci IP manualmente"
-                        join_fields = {'ip': TextField('', max_len=15, allowed=IP_CHARS),
+                        # ultima voce: "inserisci IP manualmente" - IP
+                        # precompilato a 127.0.0.1 (loopback): funziona
+                        # SEMPRE quando host e client girano sulla
+                        # stessa macchina (test/sviluppo), a differenza
+                        # della scansione automatica che puo' essere
+                        # bloccata da firewall/VPN pur essendo entrambi
+                        # sullo stesso PC
+                        join_fields = {'ip': TextField('127.0.0.1', max_len=15, allowed=IP_CHARS),
                                        'porta': TextField('42420', max_len=5, allowed=DIGITS)}
                         join_focus = 'ip'
                         error_message = None
@@ -371,11 +377,14 @@ def run_os_menu():
                 # nessun host trovato (rete che blocca il broadcast, host
                 # su un'altra rete, o nessuno ancora in ascolto) - si
                 # ripiega SUBITO sull'inserimento manuale, non e' un
-                # vicolo cieco
-                join_fields = {'ip': TextField('', max_len=15, allowed=IP_CHARS),
+                # vicolo cieco. IP precompilato a 127.0.0.1: se host e
+                # client sono sulla STESSA macchina (caso comune in
+                # sviluppo/test) funziona SEMPRE, anche quando il
+                # broadcast e' bloccato da firewall/VPN.
+                join_fields = {'ip': TextField('127.0.0.1', max_len=15, allowed=IP_CHARS),
                                'porta': TextField('42420', max_len=5, allowed=DIGITS)}
                 join_focus = 'ip'
-                error_message = "Nessuna partita trovata in automatico - inserisci l'IP a mano"
+                error_message = "Nessuna partita trovata in automatico - inserisci l'IP a mano (127.0.0.1 se e' la stessa macchina)"
                 state = 'join'
             continue
 
