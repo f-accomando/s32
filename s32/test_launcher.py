@@ -746,6 +746,53 @@ check("un OSError a meta' partita NON crasha - run_direct() ritorna normalmente"
 check("un OSError a meta' partita: il tentativo che fallisce viene registrato", _sessione_cade.invii >= 3, True)
 
 # ---------------------------------------------------------------
+# Test 13ter: BUG REALE segnalato dall'utente giocando davvero su due
+# PC ("l'host si vede come giocatore 1 ma muove il giocatore 2 sul
+# guest, e viceversa"): il loop rimappava l'input in modo che OGNI
+# istanza scrivesse SEMPRE il proprio sulla porta 0 (input(0)) - ma
+# la simulazione e' deterministica solo se OGNI istanza scrive lo
+# STESSO valore sulla STESSA porta assoluta (frame_inputs[i] e' gia'
+# l'indice ASSOLUTO del giocatore i, uguale su tutte le macchine -
+# vedi netcode_lockstep.py). Verifica che cpu.run() riceva SEMPRE
+# input_byte=frame_inputs[0] ed extra_inputs=frame_inputs[1:],
+# indipendentemente da chi e' il local_player_index (host o client) -
+# prima del fix, con local_player_index=1 il test qui sotto avrebbe
+# fallito (input_byte sarebbe stato 0xBB, non 0xAA).
+# ---------------------------------------------------------------
+_chiamate_cpu_run = []
+_orig_cpu_run = launcher.CPU.run
+def _cpu_run_spia(self, *a, **k):
+    _chiamate_cpu_run.append((k.get('input_byte'), k.get('extra_inputs')))
+    return _orig_cpu_run(self, *a, **k)
+launcher.CPU.run = _cpu_run_spia
+
+class _SessioneVettoreFisso:
+    """Ritorna sempre lo stesso vettore (0xAA, 0xBB) per ogni frame,
+    a prescindere da chi chiama - due giocatori gia' d'accordo su un
+    valore fisso per isolare SOLO la questione del mapping porte."""
+    def submit_local_input(self, frame_number, input_byte):
+        pass
+    def get_frame_inputs(self, frame_number, timeout=0.25):
+        return (0xAA, 0xBB)
+
+try:
+    for _idx_locale in (0, 1):
+        _chiamate_cpu_run.clear()
+        _buf_seat = _io_net.StringIO()
+        with _ctx_net.redirect_stdout(_buf_seat):
+            launcher.run_direct(
+                os.path.join(os.path.dirname(__file__), '..', 'carts', 'adventure_asm', 'game.asm'), 'asm',
+                show_stats=False, quit_pygame_at_end=False, renderer_mode='dirty-rects',
+                playtest=True, playtest_quick=True,
+                netcode_session=_SessioneVettoreFisso(), local_player_index=_idx_locale)
+        check(f"mapping porte (local_player_index={_idx_locale}): input_byte e' SEMPRE frame_inputs[0]",
+              len(_chiamate_cpu_run) > 0 and all(ib == 0xAA for ib, _ in _chiamate_cpu_run), True)
+        check(f"mapping porte (local_player_index={_idx_locale}): extra_inputs e' SEMPRE frame_inputs[1:]",
+              all(ei == (0xBB,) for _, ei in _chiamate_cpu_run), True)
+finally:
+    launcher.CPU.run = _orig_cpu_run
+
+# ---------------------------------------------------------------
 # Test 14: start_netcode_host() annuncia sulla LAN (LanAnnouncer) per
 # tutta l'attesa - aggiunto dopo che l'utente ha chiesto "come faccio
 # a sapere l'IP dell'host per unirmi?": la risposta e' che l'host lo

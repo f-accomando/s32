@@ -204,6 +204,69 @@ normalmente con `quit_requested=False`).
 
 ---
 
+## 2quater. Bug di sincronizzazione risolto: "mi vedo giocatore 1 ma muovo il giocatore 2"
+
+Segnalato dall'utente in un test reale funzionante (guest che trova
+l'host e si connette senza problemi - quindi non un problema di
+rete): *"l'host si vede come giocatore 1 ma muove il giocatore 2 sul
+guest, e il guest si vede come giocatore 1 ma muove giocatore 2 su
+host"*. A differenza dei problemi in 2bis/2ter, questo non era un
+crash né un problema di rete - era un bug di **sincronizzazione della
+simulazione**, più serio di un semplice scambio di etichette.
+
+**Causa**: il punto centrale del lockstep deterministico (vedi
+sezione 2) è che OGNI istanza esegue la STESSA ROM con lo STESSO
+identico vettore di input scritto sulle STESSE porte - solo così le
+simulazioni restano identiche senza scambiarsi lo stato. `frame_inputs[i]`
+(ritornato da `LockstepHost`/`LockstepClient.get_frame_inputs()`) è
+già l'input del giocatore di indice ASSOLUTO `i` (0 = chi ospita, 1 =
+il primo che si unisce, ecc. - assegnato una volta sola alla
+connessione, uguale su tutte le macchine).
+
+`_run_pygame_loop` in `launcher.py`, però, rimappava questo vettore
+per `local_player_index` prima di passarlo alla CPU:
+```python
+input_byte = frame_inputs[local_player_index]        # SBAGLIATO
+extra_inputs = tuple(v for i, v in enumerate(frame_inputs)
+                      if i != local_player_index)
+```
+Risultato: la porta 0 (`input(0)` in ConsoleLang) riceveva SEMPRE il
+proprio input locale, su OGNI macchina. Sull'host (`local_player_index=0`)
+questo capitava per caso a coincidere con la mappatura corretta, ma
+sul client (`local_player_index=1`) la porta 0 riceveva l'input del
+client invece di quello dell'host - le due istanze scrivevano valori
+diversi sulla stessa porta, quindi eseguivano ROM identiche ma con
+stato (`p1x`/`p1y` ecc. in WRAM) che DIVERGEVA subito dal primo frame
+di input: non un semplice "nome sbagliato", ma due simulazioni
+scollegate che per coincidenza sembravano un mondo solo perché la
+cartuccia non fa mai interagire i giocatori tra loro (niente
+collisioni/punteggio condiviso - con quelli, il gioco si sarebbe
+rotto in modo molto più vistoso).
+
+**Correzione**: `input_byte`/`extra_inputs` ora derivano SEMPRE dagli
+indici assoluti, mai da `local_player_index`:
+```python
+input_byte = frame_inputs[0]
+extra_inputs = frame_inputs[1:]
+```
+`local_player_index` non serve più al loop per costruire l'input
+della CPU (resta nella firma di `_run_pygame_loop`/`run_direct` solo
+per un eventuale uso futuro in UI, es. evidenziare "sei tu"). Corretto
+anche il commento nella cartuccia `carts/barebone_p2p/game.py`, che
+documentava esplicitamente (e in modo fuorviante) "`input(0)` = il
+locale su ogni istanza" - la stessa premessa sbagliata che aveva
+portato al bug.
+
+**Test aggiunto** (`test_launcher.py`, Test 13ter): monkeypatcha
+`CPU.run` per registrare `input_byte`/`extra_inputs` ad ogni frame di
+una partita vera in playtest, con una sessione di rete finta che
+ritorna sempre lo stesso vettore `(0xAA, 0xBB)`; verifica che
+`input_byte` sia sempre `0xAA` ed `extra_inputs` sempre `(0xBB,)`,
+sia con `local_player_index=0` che con `local_player_index=1` - prima
+del fix, il secondo caso falliva (avrebbe ricevuto `input_byte=0xBB`).
+
+---
+
 ## 3. Cosa è implementato
 
 ### `s32/netcode_lockstep.py`

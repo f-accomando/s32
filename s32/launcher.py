@@ -991,7 +991,14 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
 
     quit_pygame_at_end: se False, NON chiude pygame all'uscita - usato
     quando questa funzione e' chiamata dal menu (run_os_menu), che ha
-    gia' una sessione pygame aperta e vuole riusarla, non ricrearla."""
+    gia' una sessione pygame aperta e vuole riusarla, non ricrearla.
+
+    local_player_index: NON viene piu' usato per rimappare le porte
+    di input della CPU (bug corretto - vedi il commento sopra
+    l'assegnazione di input_byte/extra_inputs piu' in basso: le porte
+    seguono sempre l'indice ASSOLUTO di frame_inputs, uguale su ogni
+    istanza). Resta nella firma solo per un eventuale uso futuro
+    (es. evidenziare "sei tu" nella UI), oggi non serve al loop."""
     import time
 
     pygame = _init_pygame_once()
@@ -1132,10 +1139,25 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
                 clock.tick(60)  # mai saltare il limitatore di framerate,
                                  # nemmeno quando il frame viene scartato
                 continue
-            input_byte = frame_inputs[local_player_index]
-            extra_inputs = tuple(
-                v for i, v in enumerate(frame_inputs) if i != local_player_index
-            )
+            # BUG segnalato dall'utente in un test reale ("l'host si
+            # vede come giocatore 1 ma muove il giocatore 2 sul
+            # guest"): qui si rimappava frame_inputs mettendo SEMPRE
+            # il proprio input in porta 0 (input(0)) e gli altri a
+            # seguire - ogni istanza vedeva quindi se stessa come
+            # "input(0)" e l'altra come "input(1)". Ma la simulazione
+            # e' deterministica proprio perche' OGNI istanza esegue
+            # la stessa ROM con lo STESSO vettore di input sulle
+            # STESSE porte (vedi netcode_lockstep.py) - frame_inputs[i]
+            # e' gia' il valore del giocatore di indice ASSOLUTO i
+            # (0 = host, 1 = primo client, ecc., assegnato una volta
+            # sola da LockstepHost/LockstepClient.connect()), uguale
+            # su tutte le macchine. Rimappare per local_player_index
+            # faceva scrivere sulla PORTA 0 valori diversi a seconda
+            # di chi era locale, cioe' facendo divergere lo stato
+            # della CPU (p1x/p1y ecc.) tra host e client invece di
+            # farli girare sulla stessa simulazione condivisa.
+            input_byte = frame_inputs[0]
+            extra_inputs = frame_inputs[1:]
 
         t0 = time.perf_counter()
         n_istruzioni = cpu.run(CART_LOAD_ADDR, input_byte=input_byte, extra_inputs=extra_inputs)

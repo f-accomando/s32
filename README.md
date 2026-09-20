@@ -1572,3 +1572,34 @@ dell'input remoto.
 `test_launcher.py`, Test 13bis, con una sessione di rete finta che
 solleva `OSError` a meta' di una partita vera in playtest). 410 test
 totali. Dettagli completi in `doc_networking.md`, sezione 2ter.
+
+## Bug di sincronizzazione risolto: "mi vedo giocatore 1 ma muovo il giocatore 2"
+
+Segnalato dall'utente in un test reale funzionante (guest che trova
+l'host e si connette senza problemi): host e guest si vedevano
+entrambi come "giocatore 1", ma ognuno muoveva il "giocatore 2"
+sullo schermo dell'altro. Non un crash ne' un problema di rete - un
+bug di **sincronizzazione della simulazione**, piu' serio di un
+semplice scambio di etichette.
+
+Il lockstep deterministico richiede che OGNI istanza scriva lo
+STESSO input sulla STESSA porta assoluta (`frame_inputs[i]` e' gia'
+l'indice assoluto del giocatore i, uguale ovunque - vedi
+`netcode_lockstep.py`). `_run_pygame_loop` in `launcher.py` invece
+rimappava il vettore per `local_player_index` prima di passarlo alla
+CPU, cosicche' la porta 0 (`input(0)`) riceveva SEMPRE il proprio
+input locale su ogni macchina - host e client scrivevano valori
+diversi sulla stessa porta, facendo divergere silenziosamente lo
+stato della simulazione (mai visibile come un crash o un desync
+plateale in questa cartuccia, perche' `barebone_p2p` non fa mai
+interagire i giocatori tra loro). Corretto: `input_byte =
+frame_inputs[0]`, `extra_inputs = frame_inputs[1:]`, sempre per
+indice assoluto, mai per `local_player_index`. Corretto anche il
+commento fuorviante in `carts/barebone_p2p/game.py` che documentava
+"`input(0)` = il locale su ogni istanza" - la premessa sbagliata
+all'origine del bug.
+
+2 nuovi test (`test_launcher.py`, Test 13ter: `CPU.run` monkeypatchato
+per verificare che `input_byte`/`extra_inputs` restino identici
+indipendentemente da `local_player_index`). 414 test totali. Dettagli
+in `doc_networking.md`, sezione 2quater.

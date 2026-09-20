@@ -11,10 +11,27 @@ _shared.
 
 Differenza rispetto a barebone: QUATTRO avatar invece di uno, ognuno
 mosso dall'input del proprio slot tramite ConsoleLang input(N):
-  - giocatore 1 -> input(0)  (= input(), il locale su ogni istanza)
+  - giocatore 1 -> input(0)  (= input())
   - giocatore 2 -> input(1)
   - giocatore 3 -> input(2)
   - giocatore 4 -> input(3)
+
+ATTENZIONE (bug reale trovato dall'utente giocando su due PC, vedi
+doc_networking.md sezione 2quater): input(N) e' l'indice ASSOLUTO
+del giocatore (0 = chi ospita/host, 1 = il primo che si unisce, ecc.
+- assegnato una volta sola da LockstepHost/LockstepClient, UGUALE su
+tutte le istanze), MAI "il giocatore locale su questa macchina".
+Un'istanza precedente di questo commento diceva "input(0) = il
+locale su ogni istanza", il che sembra ovvio ma e' sbagliato: se ogni
+macchina rimappasse il proprio input sulla porta 0, la simulazione -
+che deve restare BIT PER BIT identica su tutte le istanze per essere
+deterministica - riceverebbe input diversi sulla stessa porta a
+seconda della macchina, facendo divergere lo stato (host e client
+vedrebbero mondi diversi: esattamente il sintomo "l'host si vede
+come giocatore 1 ma muove il giocatore 2 sul guest"). La cartuccia
+NON deve sapere chi e' il giocatore locale per disegnare/muovere gli
+sprite - solo il launcher, per la SUA UI (es. evidenziare "sei tu"),
+puo' averne bisogno.
 
 Questa cartuccia NON apre lei stessa le connessioni di rete - come il
 resto della CPU S32, non sa nulla dell'esistenza della rete: legge
