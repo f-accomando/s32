@@ -25,20 +25,32 @@ per rispondere a tre domande concrete:
      costano una frazione, vedi il costo marginale sopra) - ma questo
      lascia ancora aperto un fattore ~7x tra "sfondo+7 sprite" isolato
      (~1.9ms) e 'draw_sprites' nel gioco vero (~12-14ms).
-  4. NUOVO - ipotesi piu' probabile trovata rileggendo il codice:
-     ALPHA BLENDING. L'atlas sprite (`sprite_atlas_surface` in
-     GpuRenderer, launcher.py) e' un pygame.Surface con SRCALPHA (gli
-     sprite hanno bordi trasparenti) - Texture.from_surface() su una
-     Surface SRCALPHA imposta AUTOMATICAMENTE blend_mode=BLENDMODE_BLEND
-     sulla texture risultante (verificato per introspezione diretta:
-     BLENDMODE_NONE=0 per una Surface opaca, BLENDMODE_BLEND=1 per una
-     Surface SRCALPHA). Il tile usato nei test 1-3 sopra e' OPACO
-     (BLENDMODE_NONE, il caso piu' veloce per una GPU) - non
-     rappresentativo del vero atlas sprite. Questa funzione confronta
-     direttamente un tile OPACO contro un tile SRCALPHA (stessa
-     dimensione, stesso contenuto) per isolare il costo dell'alpha
-     blending sulla GPU del Pi 1 - se e' alto, e' la spiegazione del
-     fattore ~7x mancante, non il numero di tile ne' l'area disegnata.
+  4. ALPHA BLENDING - ESCLUSA da un terzo giro di dati reali: un tile
+     OPACO e uno SRCALPHA (stesso contenuto) costano quasi lo stesso
+     (+3%, dentro il rumore di misura). Non e' questo.
+  5. Anche la cache dell'atlas sprite e' stata esclusa (verificato
+     rigiocando la stessa sequenza fuori da questo script: solo 7
+     "cache miss" in tutto il playtest, quasi tutti nei primissimi
+     frame - durante lo scroll sostenuto l'atlas e' gia' completamente
+     "caldo"). E il gioco vero, rilanciato con clear/bg_draw/
+     sprite_draws separati, conferma che il costo NON e' nello sfondo
+     (bg_draw=0.1ms, economico) ma proprio nel loop sprite
+     (sprite_draws=12-14ms) - nonostante siano solo 3-7 tile per
+     frame. Quattro ipotesi esaurite (area, alpha, cache, sfondo).
+  6. NUOVO - variabile mai testata finora: nei test 1-4 sopra il tile
+     e' sempre una texture DEDICATA 32x32. Il vero atlas sprite
+     (`sprite_atlas_texture` in GpuRenderer) e' invece una texture
+     GRANDE 256x256 (8x8 slot da 32x32, vedi ATLAS_COLS/
+     ATLAS_TILES_MAX in launcher.py) - ogni sprite viene disegnato con
+     `srcrect` che seleziona un sotto-rettangolo 32x32 DENTRO quella
+     texture piu' grande, non una texture a se stante. Questa funzione
+     confronta DIRETTAMENTE le due cose: N draw() da una texture
+     dedicata 32x32 contro N draw() con lo stesso srcrect da una
+     texture atlas 256x256 (stesso identico contenuto visivo,
+     costruzione IDENTICA a quella vera - Texture.from_surface() su
+     una Surface SRCALPHA 256x256) - se il campionamento con srcrect
+     da una texture piu' grande costa di piu', e' probabilmente questa
+     la causa mai testata finora.
 
 Uso: python3 bench_gpu_draw.py  (lanciarlo SULLA Pi 1 vera - qui in
 sviluppo i numeri non sono comparabili, nessuna GPU reale disponibile
@@ -189,6 +201,31 @@ def main():
         renderer.present()
     ms_n_opaco = _timeit(f"clear()+{N_SPRITE_REALISTICO} draw(32x32, OPACO/NONE)+present()", _n_draws_opaco)
 
+    # -- DOMANDA 6 (nuova): il vero atlas sprite non e' mai una
+    # texture dedicata come tile_tex_alpha sopra - e' una texture
+    # GRANDE 256x256 (8x8 slot da 32x32, vedi ATLAS_COLS/
+    # ATLAS_TILES_MAX in GpuRenderer), e ogni sprite viene disegnato
+    # con srcrect che seleziona un sotto-rettangolo 32x32 DENTRO
+    # quella texture piu' grande. Costruzione IDENTICA a quella vera:
+    # Texture.from_surface() su una Surface SRCALPHA 256x256, poi
+    # draw(srcrect=..., dstrect=...) - mai testato finora, tutti i
+    # test sopra usavano una texture dedicata piccola --
+    ATLAS_SIZE = 256  # 8 colonne x 8 righe x 32px, come nel gioco vero
+    atlas_surf = pygame.Surface((ATLAS_SIZE, ATLAS_SIZE), pygame.SRCALPHA)
+    atlas_surf.fill((200, 80, 40, 255), rect=(0, 0, 32, 32))  # un solo
+                                                                # slot popolato,
+                                                                # come basterebbe
+                                                                # per questo test
+    atlas_tex = video.Texture.from_surface(renderer, atlas_surf)
+    print(f"atlas 256x256: blend_mode={atlas_tex.blend_mode} (1=BLEND, come il vero atlas sprite)")
+
+    def _n_draws_da_atlas(n=N_SPRITE_REALISTICO):
+        renderer.clear()
+        for i in range(n):
+            atlas_tex.draw(srcrect=(0, 0, 32, 32), dstrect=((i % 15) * 32, 0, 32, 32))
+        renderer.present()
+    ms_n_atlas = _timeit(f"clear()+{N_SPRITE_REALISTICO} draw(srcrect 32x32 DA ATLAS 256x256)+present()", _n_draws_da_atlas)
+
     print()
     print("=== riepilogo ===")
     print(f"overhead fisso di clear()+present() da soli: {ms_baseline:.3f} ms")
@@ -214,6 +251,14 @@ def main():
     if costo_extra_alpha > 0.5:
         print("-> L'ALPHA BLENDING costa significativamente di piu': e' probabilmente questa la causa "
               "del divario tra il benchmark isolato e i ~12-14ms misurati nel gioco vero, non il numero di sprite.")
+    costo_extra_atlas = ms_n_atlas - ms_n_opaco
+    pct_atlas = (costo_extra_atlas / ms_n_opaco * 100) if ms_n_opaco else 0
+    print(f"{N_SPRITE_REALISTICO} draw da texture DEDICATA 32x32: {ms_n_opaco:.3f} ms  vs  "
+          f"{N_SPRITE_REALISTICO} draw con srcrect DA ATLAS 256x256 (come il vero atlas sprite): "
+          f"{ms_n_atlas:.3f} ms -> differenza {costo_extra_atlas:+.3f} ms ({pct_atlas:+.0f}%)")
+    if costo_extra_atlas > 0.5:
+        print("-> Campionare con srcrect da una texture PIU' GRANDE costa significativamente di piu': "
+              "probabilmente la vera causa del divario, non l'alpha blending ne' il numero di sprite.")
     print()
     print("Incolla questo intero output com'e' per l'analisi.")
 

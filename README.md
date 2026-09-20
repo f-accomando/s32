@@ -1811,3 +1811,38 @@ risposta definitiva. Se confermato, la cartuccia (o il motore) andra'
 guardato per capire se serve DAVVERO l'alpha blending per ogni sprite
 disegnato o se una trasparenza binaria (colorkey) potrebbe bastare
 per la maggior parte dei casi.
+
+## Terzo giro di dati reali: alpha blending ESCLUSO, cache dell'atlas ESCLUSA - resta una sola variabile mai testata
+
+L'utente ha rilanciato `bench_gpu_draw.py` sulla Pi 1 vera: un tile
+OPACO e uno SRCALPHA costano quasi lo stesso (+3%, dentro il rumore
+di misura) - l'alpha blending NON e' la causa.
+
+Verificato anche (in locale, rigiocando la stessa sequenza di
+playtest fuori da questo script, senza bisogno della Pi): la cache
+dell'atlas sprite NON e' la causa - solo 7 "cache miss" in tutto il
+playtest (su 3440 lookup), quasi tutti nei primissimi frame; durante
+"2b-scroll sostenuto" (1334 lookup) ce n'e' **1 solo**. L'atlas e'
+gia' completamente "caldo" durante la fase che ci interessa.
+
+E il gioco vero, rilanciato con `clear`/`bg_draw`/`sprite_draws`
+separati (vedi sezione sopra), conferma sui dati reali che il costo
+NON e' nello sfondo (`bg_draw=0.1ms`, economico com'era prevedibile)
+ma proprio nel loop sprite (`sprite_draws=12-14ms`) - nonostante siano
+solo 3-7 tile per frame. Quattro ipotesi esaurite in tre giri di
+misure reali: area disegnata, alpha blending, cache dell'atlas,
+costo dello sfondo.
+
+**Ultima variabile rimasta, mai testata finora**: in tutti i benchmark
+precedenti il tile disegnato era sempre una texture DEDICATA 32x32.
+Il vero atlas sprite (`sprite_atlas_texture`) e' invece una texture
+GRANDE 256x256 (8x8 slot da 32x32, `ATLAS_COLS`/`ATLAS_TILES_MAX` in
+`GpuRenderer`) - ogni sprite viene disegnato con `srcrect` che
+seleziona un sotto-rettangolo 32x32 DENTRO quella texture piu'
+grande, mai una texture a se stante. `bench_gpu_draw.py` ora confronta
+DIRETTAMENTE le due cose, con una costruzione identica a quella vera
+(`Texture.from_surface()` su una Surface `SRCALPHA` 256x256): se
+campionare con `srcrect` da una texture piu' grande costa
+significativamente di piu' che disegnare una texture dedicata piccola,
+e' probabilmente questa la causa mai considerata finora - non l'area,
+non l'alpha, non la cache, non lo sfondo.
