@@ -66,6 +66,60 @@ host. Il form "Unisciti a partita" del menu OS precompila già
 
 ---
 
+## 2bis. Test reale su due PC (utente) - problemi trovati, non ancora risolti
+
+Riportato dall'utente dopo un test vero su due macchine sulla stessa
+rete: **scoprire l'host in un verso ha funzionato, nell'altro no**
+(stessi due PC, ruoli invertiti) - e quando la scoperta HA trovato
+l'host, la connessione vera è comunque **fallita in timeout**, e
+l'errore non veniva nemmeno mostrato a schermo (bug di UI, corretto -
+vedi sotto). La causa di rete vera e propria resta un sospetto, non
+ancora verificabile da qui (nessun laboratorio a due macchine
+disponibile in questo ambiente di sviluppo).
+
+**Bug di UI corretto**: `_draw_list_screen` (schermata `join_pick`,
+la lista degli host trovati) non disegnava mai `error_message` - un
+fallimento di connessione tornava alla lista IN SILENZIO, sembrando
+"tornare indietro senza motivo" invece di spiegare cosa non ha
+funzionato. Ora lo mostra, e il messaggio per un `TimeoutError`/
+`OSError` include un suggerimento esplicito sul firewall
+(`_friendly_netcode_error` in `os_menu.py`).
+
+**Sospetti principali per la parte di rete** (non ancora risolti nel
+codice, richiedono verifica su hardware vero):
+- **Scoperta asimmetrica**: il sospetto più probabile è una scheda di
+  rete virtuale (VPN, VMware/VirtualBox, Hyper-V, Docker Desktop) su
+  UNA delle due macchine, con una rotta di default che "vince" su
+  quella vera - `sendto(msg, ('<broadcast>', porta))` in
+  `LanAnnouncer` manda il pacchetto sull'interfaccia di default
+  decisa dal sistema operativo, che su una macchina con più schede
+  attive può non essere quella della LAN reale. Un firewall che
+  blocca il broadcast in uscita solo su una delle due macchine è
+  l'altro sospetto, ugualmente plausibile.
+- **Connessione fallita nonostante l'host trovato**: la scoperta
+  (porta `DISCOVERY_PORT`, 42421) e la connessione di gioco vera
+  (porta scelta dall'host, es. 42420) sono socket DIVERSI - un
+  firewall può avere una regola per l'uno e non per l'altro (es. il
+  primo popup di Windows Firewall accettato, il secondo bloccato o
+  mai comparso).
+
+**Da provare quando si ripete il test** (non ancora automatizzato,
+serve farlo a mano su hardware vero):
+1. Disattivare temporaneamente eventuali VPN/reti virtuali sulla
+   macchina che non riesce a farsi trovare, e ripetere.
+2. Verificare con `ping <ip dell'altro PC>` che la connettività di
+   base funzioni PRIMA di provare il gioco.
+3. Controllare le regole del firewall (Windows Firewall o
+   equivalente) per `python.exe`/l'eseguibile usato, sia in entrata
+   che in uscita, sia per la porta 42421 (scoperta) sia per la porta
+   di gioco scelta.
+4. Se la scoperta continua a fallire in un verso, usare comunque il
+   form manuale con l'IP reale dell'host sulla LAN (non `127.0.0.1`,
+   valido solo per la stessa macchina) - bypassa la scoperta ma non
+   il firewall sulla porta di gioco.
+
+---
+
 ## 3. Cosa è implementato
 
 ### `s32/netcode_lockstep.py`
@@ -164,8 +218,17 @@ lockstep), nessuna integrazione richiesta finora.
 
 ## 4. Cosa NON è ancora fatto
 
-- **Mai verificato su due macchine fisiche diverse** - solo
-  host+client sulla stessa macchina via loopback.
+- **Verificato su due macchine fisiche diverse dall'utente - con
+  problemi reali, non ancora risolti nel codice** (vedi sezione 2bis
+  per i dettagli e i sospetti): (a) la scoperta LAN e' risultata
+  ASIMMETRICA (PC-A trovava l'host su PC-B, ma non viceversa
+  scambiando i ruoli sugli stessi due PC - sospetto principale:
+  scheda di rete virtuale/VPN su una delle due macchine che devia il
+  traffico broadcast); (b) un host trovato dalla scoperta a volte non
+  si lascia raggiungere dalla connessione vera (timeout) - la
+  scoperta (porta 42421) e la connessione di gioco (porta scelta
+  dall'host, es. 42420) sono socket/porte DIVERSE, un firewall puo'
+  permettere l'una e bloccare l'altra.
 - **La schermata "Ospita partita" resta bloccata e statica** durante
   `wait_for_players()` - mostra "in attesa di N giocatori..." ma non
   aggiorna la lista via via che qualcuno si unisce (nessun evento

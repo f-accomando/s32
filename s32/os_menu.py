@@ -121,6 +121,24 @@ def _entry_and_kind(cart):
     return entry, kind
 
 
+def _friendly_netcode_error(exc, port):
+    """Messaggio d'errore piu' utile del solo testo tecnico
+    dell'eccezione - segnalato dall'utente testando su due PC reali:
+    un timeout di connessione (host trovato dalla scoperta LAN ma la
+    connessione vera cade) sembrava "tornare indietro senza motivo"
+    perche' l'errore non veniva nemmeno mostrato a schermo (bug a
+    parte, vedi _draw_list_screen). La causa piu' comune di un
+    TimeoutError/OSError qui e' il firewall che blocca la porta di
+    gioco (diversa dalla porta di SCOPERTA, 42421 - avere trovato
+    l'host non garantisce che la connessione vera passi), non un bug -
+    lo diciamo esplicitamente invece di lasciare solo il testo tecnico
+    ("Timeout connessione a ..."), che non suggerisce cosa controllare."""
+    base = str(exc)
+    if isinstance(exc, (TimeoutError, OSError)):
+        return f"{base} - controlla il firewall sulla porta {port}/UDP su ENTRAMBI i PC"
+    return base
+
+
 def _draw_grid_screen(screen, pygame, fonts, carts_dir, grid, icon_cache):
     font, font_small, font_title = fonts
     title = font_title.render("S32", True, (230, 230, 240))
@@ -153,13 +171,18 @@ def _draw_grid_screen(screen, pygame, fonts, carts_dir, grid, icon_cache):
     screen.blit(hint, (GRID_ORIGIN_X, WINDOW_H - 30))
 
 
-def _draw_list_screen(screen, font, font_title, heading, list_menu):
+def _draw_list_screen(screen, font, font_title, heading, list_menu, font_small=None, error_message=None):
     title = font_title.render(heading, True, (230, 230, 240))
     screen.blit(title, (GRID_ORIGIN_X, 40))
+    y = 100
     for i, label in enumerate(list_menu.items):
         color = (255, 220, 100) if i == list_menu.index else (200, 200, 200)
         text = font.render(label, True, color)
-        screen.blit(text, (GRID_ORIGIN_X, 100 + i * 40))
+        screen.blit(text, (GRID_ORIGIN_X, y))
+        y += 40
+    if error_message and font_small is not None:
+        err = font_small.render(error_message, True, (220, 90, 90))
+        screen.blit(err, (GRID_ORIGIN_X, y + 10))
 
 
 def _draw_form_screen(screen, font, font_title, font_small, heading, fields, focus_name, error_message):
@@ -348,7 +371,7 @@ def run_os_menu():
             try:
                 netcode_session, local_idx = start_netcode_host(porta, num_giocatori)
             except (ValueError, TimeoutError, OSError) as exc:
-                error_message = str(exc)
+                error_message = _friendly_netcode_error(exc, porta)
                 state = 'host'
                 continue
             entry, kind = _entry_and_kind(chosen_cart)
@@ -409,7 +432,7 @@ def run_os_menu():
             try:
                 netcode_session, local_idx = start_netcode_client(ip, porta)
             except (ValueError, TimeoutError, OSError) as exc:
-                error_message = str(exc)
+                error_message = _friendly_netcode_error(exc, porta)
                 state = 'join'
                 continue
             entry, kind = _entry_and_kind(chosen_cart)
@@ -432,7 +455,7 @@ def run_os_menu():
             try:
                 netcode_session, local_idx = start_netcode_client(ip, porta)
             except (ValueError, TimeoutError, OSError) as exc:
-                error_message = str(exc)
+                error_message = _friendly_netcode_error(exc, porta)
                 state = 'join_pick'
                 continue
             entry, kind = _entry_and_kind(chosen_cart)
@@ -458,7 +481,8 @@ def run_os_menu():
                                 ('Numero giocatori', 'giocatori', host_fields['giocatori'])],
                                host_focus, error_message)
         elif state == 'join_pick':
-            _draw_list_screen(screen, fonts[0], fonts[2], "Partite trovate sulla rete locale:", join_pick_menu)
+            _draw_list_screen(screen, fonts[0], fonts[2], "Partite trovate sulla rete locale:",
+                               join_pick_menu, font_small=fonts[1], error_message=error_message)
         elif state == 'join':
             _draw_form_screen(screen, fonts[0], fonts[2], fonts[1], "Unisciti a partita",
                                [('IP host', 'ip', join_fields['ip']),
