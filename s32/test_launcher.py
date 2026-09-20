@@ -307,7 +307,18 @@ check("_sdl2_video: ripiega su pygame._sdl2.video quando i nomi diretti mancano 
 # ---------------------------------------------------------------
 # GpuRenderer: stessa logica di IncrementalRenderer (rebuild
 # completo/incrementale, cache sprite) ma con Renderer+Texture al
-# posto di Surface/blit - verificato con un mock completo
+# posto di Surface/blit - verificato con un mock completo.
+#
+# Il mock di Texture/Renderer qui sotto e' stato verificato contro
+# pygame-ce VERO (2.5.8, SDL_VIDEODRIVER=dummy, headless) prima di
+# scrivere questi test - non solo "sembra ragionevole": la sequenza
+# Texture(renderer, size, target=True) -> renderer.target = tex ->
+# altra_texture.draw(dstrect=...) -> renderer.target = None e'
+# stata eseguita per davvero contro l'SDL2 reale (incluso un
+# controllo pixel-per-pixel del risultato: uno shift verticale +
+# patch della striscia produce esattamente lo stesso contenuto di
+# Surface.scroll()+blit(), nessuna riga scoperta o duplicata) prima
+# di fidarcisi per il codice di produzione in launcher.py.
 # ---------------------------------------------------------------
 from launcher import GpuRenderer
 
@@ -331,18 +342,32 @@ class _FakeSurfaceGR:
     def fill(self, *a, **k): pass
 
 class _FakeTextureGR:
-    def __init__(self, renderer, surface):
-        _chiamate.append('texture_creata')
+    def __init__(self, renderer, size, depth=0, static=False, streaming=False,
+                 target=False, scale_quality=0):
+        self.renderer = renderer
+        self.size = size
+        self.is_target = target
+        _chiamate.append(('texture_new', size, target))
     def update(self, surface, area=None):
         _chiamate.append(('texture_update', getattr(surface, 'size', None), area))
-    def draw(self, dstrect=None, **k):
-        _chiamate.append(('texture_draw', dstrect))
+    def draw(self, srcrect=None, dstrect=None, **k):
+        # registra anche il target CORRENTE del renderer nel momento
+        # esatto del draw - e' cosi' che i test sotto verificano che
+        # lo shift/la striscia vengano disegnati DENTRO la texture di
+        # scambio (renderer.target = scratch) e non sulla finestra
+        _chiamate.append(('texture_draw', srcrect, dstrect, self.renderer.target))
     @classmethod
     def from_surface(cls, renderer, surface):
         _chiamate.append('from_surface')
-        return cls(renderer, surface)
+        obj = cls.__new__(cls)
+        obj.renderer = renderer
+        obj.size = getattr(surface, 'size', None)
+        obj.is_target = False
+        return obj
 
 class _FakeRendererGR:
+    def __init__(self):
+        self.target = None
     def clear(self):
         _chiamate.append('clear')
     def present(self):
@@ -356,7 +381,8 @@ _pygame_gr.SRCALPHA = 4
 _pygame_gr.Surface = _FakeSurfaceGR
 _pygame_gr.image = _types.SimpleNamespace(frombuffer=lambda data, size, fmt: _FakeSurfaceGR(size))
 
-_gr = GpuRenderer(_pygame_gr, _FakeRendererGR())
+_renderer_gr = _FakeRendererGR()
+_gr = GpuRenderer(_pygame_gr, _renderer_gr)
 
 _vram_gr = bytearray(200000)
 _cgram_gr = bytearray(10000)
@@ -371,58 +397,116 @@ for _s in range(64):
     _write_slot_gr(_oam_gr, _s, 0, 0xFFFF, 0)
 _write_slot_gr(_oam_gr, 0, 200, 150, 16)
 
+from memory_map import SCREEN_W_PX as _SW, SCREEN_H_PX as _SH
+
 _chiamate.clear()
 _gr.render(_vram_gr, _oam_gr, _cgram_gr, current_stage=1, scroll_x=0, scroll_y=0)
 check("GpuRenderer: primo frame chiama clear()", 'clear' in _chiamate, True)
 check("GpuRenderer: primo frame chiama present()", 'present' in _chiamate, True)
 _draws = [c for c in _chiamate if isinstance(c, tuple) and c[0] == 'texture_draw']
 check("GpuRenderer: primo frame disegna sfondo + 1 sprite (2 texture_draw)", len(_draws), 2)
-check("GpuRenderer: primo frame crea le texture (bg_texture era None)",
-      _chiamate.count('from_surface'), 2)  # sfondo + 1 sprite
+# sfondo: creata con Texture(renderer, size, target=True) - MAI
+# from_surface() per lo sfondo (issue #10: deve poter fare da
+# render-target in un futuro frame di scroll, cosa che
+# Texture.from_surface() non garantisce) - solo l'atlas sprite usa
+# ancora from_surface()
+_new_textures_primo_frame = [c for c in _chiamate if isinstance(c, tuple) and c[0] == 'texture_new']
+check("GpuRenderer: primo frame crea bg_texture con target=True (non from_surface)",
+      any(t for (_, _, t) in _new_textures_primo_frame), True)
+check("GpuRenderer: primo frame -> from_surface SOLO per l'atlas sprite (1 volta, non per lo sfondo)",
+      _chiamate.count('from_surface'), 1)
+_updates_primo_frame = [c for c in _chiamate if isinstance(c, tuple) and c[0] == 'texture_update']
+check("GpuRenderer: primo frame -> UN SOLO update() per caricare lo sfondo iniziale",
+      len(_updates_primo_frame), 1)
+if _updates_primo_frame:
+    check("GpuRenderer: primo frame -> lo sfondo iniziale e' l'INTERO schermo",
+          _updates_primo_frame[0][1], (_SW, _SH))
 
 _chiamate.clear()
 _gr.render(_vram_gr, _oam_gr, _cgram_gr, current_stage=1, scroll_x=0, scroll_y=0)
 _updates_vuoto = [c for c in _chiamate if isinstance(c, tuple) and c[0] == 'texture_update']
+_nuove_vuoto = [c for c in _chiamate if isinstance(c, tuple) and c[0] == 'texture_new']
 check("GpuRenderer: frame successivo SENZA cambiamenti non ricrea/aggiorna texture",
-      'from_surface' in _chiamate or len(_updates_vuoto) > 0, False)
+      'from_surface' in _chiamate or len(_updates_vuoto) > 0 or len(_nuove_vuoto) > 0, False)
 
-# -- il fix corretto (dopo che il primo tentativo - aggiornare solo
-# la striscia - si e' rivelato un bug di correttezza, trovato
-# dall'utente GIOCANDO DAVVERO: "il personaggio sembrava stazionario
-# e i nemici oltrepassavano il muro". La texture GPU non ha un
-# equivalente di Surface.scroll() (che sposta FISICAMENTE i pixel
-# gia' disegnati nella Surface CPU) - update(area=striscia) scrive
-# SOLO quella striscia, lasciando il resto della texture congelato
-# alla vecchia posizione. Quindi: anche durante uno scroll piccolo,
-# va spinto l'INTERO bg_surface (gia' corretto in CPU), area=None --
-from memory_map import SCREEN_W_PX as _SW, SCREEN_H_PX as _SH
+# ---------------------------------------------------------------
+# Scroll GPU-side vero (issue #10) - sostituisce il vecchio fix che
+# spingeva sempre l'INTERO bg_surface (480x320) sulla texture ad ogni
+# frame di scroll (~36ms/frame misurato su Pi 1 reale, quasi tutto il
+# guadagno della GPU). Ora l'unico upload CPU->GPU e' la striscia
+# nuova (piccola); il resto del contenuto gia' in VRAM viene spostato
+# con un render-to-texture (GPU->GPU, mai un giro per la RAM).
+# ---------------------------------------------------------------
+_dy_test = 10  # scroll_y 0 -> 10: stesso 'ramo dy>0' di launcher.py
+_strip_h_atteso = _dy_test
+_strip_y_atteso = _SH - _strip_h_atteso
+
+_bg_texture_prima_scroll = _gr.bg_texture  # per verificare il ping-pong sotto
 
 _chiamate.clear()
-_gr.render(_vram_gr, _oam_gr, _cgram_gr, current_stage=1, scroll_x=0, scroll_y=10)
+_gr.render(_vram_gr, _oam_gr, _cgram_gr, current_stage=1, scroll_x=0, scroll_y=_dy_test)
+
 _updates = [c for c in _chiamate if isinstance(c, tuple) and c[0] == 'texture_update']
-check("GpuRenderer: scroll cambiato -> update() la texture esistente", len(_updates) == 1, True)
+check("GpuRenderer: scroll -> UN SOLO texture_update (solo la striscia, non piu' lo sfondo intero)",
+      len(_updates), 1)
 if _updates:
-    _surf_size, _area = _updates[0][1], _updates[0][2]
-    check("GpuRenderer: scroll piccolo -> la surface passata e' l'INTERO sfondo (480,320), non solo la striscia",
-          _surf_size, (_SW, _SH))
-    check("GpuRenderer: scroll piccolo -> area=None (texture GPU non sa 'scrollare' il contenuto gia' caricato)",
-          _area, None)
-check("GpuRenderer: scroll cambiato -> NON ricrea la texture da zero",
+    check("GpuRenderer: scroll -> la surface caricata e' PICCOLA (solo strip_h righe, non 320)",
+          _updates[0][1], (_SW, _strip_h_atteso))
+    check("GpuRenderer: scroll -> area coerente con la striscia (0,0,W,strip_h)",
+          _updates[0][2], (0, 0, _SW, _strip_h_atteso))
+
+_draws_scroll = [c for c in _chiamate if isinstance(c, tuple) and c[0] == 'texture_draw']
+_draws_su_scratch = [c for c in _draws_scroll if c[3] is not None]
+check("GpuRenderer: scroll -> ALMENO 2 disegni DENTRO la texture di scambio (shift + striscia)",
+      len(_draws_su_scratch) >= 2, True)
+_shift_draw = next((c for c in _draws_su_scratch if c[2] == (0, -_dy_test, _SW, _SH)), None)
+check("GpuRenderer: scroll -> lo shift disegna la VECCHIA texture intera, spostata di -dy",
+      _shift_draw is not None, True)
+_strip_draw = next((c for c in _draws_su_scratch
+                     if c[1] == (0, 0, _SW, _strip_h_atteso) and c[2] == (0, _strip_y_atteso, _SW, _strip_h_atteso)),
+                    None)
+check("GpuRenderer: scroll -> la striscia nuova viene disegnata esattamente dove lo shift l'ha scoperta",
+      _strip_draw is not None, True)
+
+check("GpuRenderer: scroll -> il renderer.target torna a None prima di comporre il frame finale",
+      _renderer_gr.target, None)
+check("GpuRenderer: scroll -> NON ricrea la texture da zero (from_surface)",
       'from_surface' in _chiamate, False)
+_nuove_scroll = [c for c in _chiamate if isinstance(c, tuple) and c[0] == 'texture_new']
+check("GpuRenderer: primo scroll -> crea ESATTAMENTE 2 texture nuove (scratch + striscia), mai piu' dopo",
+      len(_nuove_scroll), 2)
+check("GpuRenderer: primo scroll -> ping-pong avvenuto (bg_texture non e' piu' l'oggetto di prima)",
+      _gr.bg_texture is not _bg_texture_prima_scroll, True)
+
+# -- un SECONDO frame di scroll deve RIUSARE le stesse texture di
+# scambio gia' create (mai una allocazione per frame - stessa
+# filosofia gia' verificata per l'atlas sprite) --
+_chiamate.clear()
+_gr.render(_vram_gr, _oam_gr, _cgram_gr, current_stage=1, scroll_x=0, scroll_y=_dy_test * 2)
+_nuove_secondo_scroll = [c for c in _chiamate if isinstance(c, tuple) and c[0] == 'texture_new']
+check("GpuRenderer: secondo scroll -> NESSUNA texture nuova (scratch/striscia gia' create, riusate)",
+      len(_nuove_secondo_scroll), 0)
+_updates_secondo_scroll = [c for c in _chiamate if isinstance(c, tuple) and c[0] == 'texture_update']
+check("GpuRenderer: secondo scroll -> ancora un solo update piccolo (non e' tornato il costo pieno)",
+      len(_updates_secondo_scroll) == 1 and _updates_secondo_scroll[0][1] == (_SW, _strip_h_atteso), True)
 
 # -- controllo simmetrico: un rebuild completo (cambio stanza) DEVE
 # ancora aggiornare l'INTERA texture (area=None) - il fix riguarda
 # solo lo scroll incrementale, non deve rompere il caso normale.
-# bg_texture esiste gia' dal primo frame, quindi qui si aggiorna
-# quella esistente con l'intero nuovo sfondo, non se ne ricrea una --
+# bg_texture esiste gia', quindi qui si aggiorna quella esistente con
+# l'intero nuovo sfondo, non se ne ricrea una --
 _chiamate.clear()
 _gr.render(_vram_gr, _oam_gr, _cgram_gr, current_stage=2, scroll_x=0, scroll_y=0)
 _updates_rebuild = [c for c in _chiamate if isinstance(c, tuple) and c[0] == 'texture_update']
 check("GpuRenderer: cambio stanza -> UN SOLO update() con l'intera texture",
       len(_updates_rebuild), 1)
 if _updates_rebuild:
-    check("GpuRenderer: cambio stanza -> area=None (intera texture, non una striscia)",
+    check("GpuRenderer: cambio stanza -> la surface e' l'INTERO sfondo (480,320), non una striscia",
+          _updates_rebuild[0][1], (_SW, _SH))
+    check("GpuRenderer: cambio stanza -> area=None (intera texture)",
           _updates_rebuild[0][2], None)
+check("GpuRenderer: cambio stanza -> NON crea texture nuove (riusa bg_texture esistente)",
+      any(c for c in _chiamate if isinstance(c, tuple) and c[0] == 'texture_new'), False)
 # l'atlas sprite NON si svuota al cambio stanza (tile_index e' un
 # identificatore stabile in tutto il cartridge - vedi GpuRenderer) -
 # il tile gia' in cache resta tale, nessun from_surface/update extra
