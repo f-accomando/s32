@@ -304,6 +304,35 @@ check("PORT_SCROLL_Y aggiorna cpu.scroll_y", c26.scroll_y, 250)
 c26.write16(0x001000, 4660)
 check("scritture normali continuano a funzionare dopo SCROLL_X/Y", c26.read16(0x001000), 4660)
 
+# ---------------------------------------------------------------
+# Test 16: run() con input di 4 giocatori (PORT_INPUT_P2/P3/P4) -
+# aggiunti per il multiplayer locale, vedi netplay.py e
+# carts/barebone_p2p/. Default 0 se non passati: nessuna cartuccia
+# esistente che chiama run() con solo input_byte deve accorgersi del
+# cambiamento (retrocompatibilita').
+# ---------------------------------------------------------------
+from cpu import PORT_INPUT, PORT_INPUT_P2, PORT_INPUT_P3, PORT_INPUT_P4
+
+c27 = CPU()
+c27.mem[0x1000] = 0x01  # HALT - i valori vanno scritti gia' PRIMA che
+                         # run() esegua anche una sola istruzione
+c27.run(0x1000, input_byte=0x01, input_p2=0x02, input_p3=0x04, input_p4=0x08)
+check("run(): PORT_INPUT (giocatore 1)", c27.mem[PORT_INPUT], 0x01)
+check("run(): PORT_INPUT_P2 (giocatore 2)", c27.mem[PORT_INPUT_P2], 0x02)
+check("run(): PORT_INPUT_P3 (giocatore 3)", c27.mem[PORT_INPUT_P3], 0x04)
+check("run(): PORT_INPUT_P4 (giocatore 4)", c27.mem[PORT_INPUT_P4], 0x08)
+
+c28 = CPU()
+c28.mem[0x1000] = 0x01  # HALT
+c28.run(0x1000, input_byte=0x10)
+check("run(): senza passare input_p2/3/4, restano a 0 (retrocompat.)",
+      (c28.mem[PORT_INPUT_P2], c28.mem[PORT_INPUT_P3], c28.mem[PORT_INPUT_P4]), (0, 0, 0))
+
+# gli indirizzi P2/P3/P4 sono spaziati di 2 byte: un LDA (16 bit, vedi
+# read16) su uno di essi non deve mai "vedere" il valore del successivo
+check("PORT_INPUT_P2/P3/P4: nessuna sovrapposizione a 16 bit",
+      c27.read16(PORT_INPUT_P2), 0x02)
+
 print()
 if fails == 0:
     print("Tutti i test passati.")

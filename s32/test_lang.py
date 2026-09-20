@@ -263,6 +263,44 @@ for i, b in enumerate(rom13): c13.mem[0x1000+i] = b
 c13.run(0x1000)
 check("operatore XOR: 3^1", c13.read16(0x001000), 2)
 
+# ---------------------------------------------------------------
+# Test 14: peek(indirizzo) - controparte in lettura di poke(), aggiunta
+# per leggere l'input dei giocatori 2-4 (PORT_INPUT_P2/P3/P4, vedi
+# cpu.py e carts/barebone_p2p/)
+# ---------------------------------------------------------------
+r14 = compile_source("""
+var p2 = peek(0x042005)
+poke(0x001000, p2)
+""", var_base=0x2000)
+rom14 = assemble(r14['asm'], base_addr=0x1000)
+c14 = CPU()
+for i, b in enumerate(rom14): c14.mem[0x1000+i] = b
+c14.run(0x1000, input_p2=9)
+check("peek(indirizzo letterale): legge il valore scritto li'", c14.read16(0x001000), 9)
+
+# peek() usato direttamente in una condizione, come fara' davvero
+# barebone_p2p per leggere il tasto premuto dal giocatore 2
+r14b = compile_source("""
+var out = 0
+if (peek(0x042005) & 1) {
+    out = 77
+}
+poke(0x001000, out)
+""", var_base=0x2000)
+rom14b = assemble(r14b['asm'], base_addr=0x1000)
+c14b = CPU()
+for i, b in enumerate(rom14b): c14b.mem[0x1000+i] = b
+c14b.run(0x1000, input_p2=1)  # bit UP premuto
+check("peek() dentro if(): legge un bit dell'input del giocatore 2", c14b.read16(0x001000), 77)
+
+# indirizzo non letterale: deve restare un errore chiaro, stesso
+# vincolo di poke() (la CPU non ha indirizzamento indicizzato)
+try:
+    compile_source("var addr = 0x042005\nvar x = peek(addr)\n", var_base=0x2000)
+    check("peek() con indirizzo non letterale: solleva SyntaxError", "nessun errore", "SyntaxError")
+except SyntaxError:
+    check("peek() con indirizzo non letterale: solleva SyntaxError", "SyntaxError", "SyntaxError")
+
 print()
 if fails == 0:
     print("Tutti i test passati.")

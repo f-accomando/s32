@@ -97,10 +97,38 @@ Nessuna di queste modifiche è ancora stata fatta.
 
 ## 3. Stato attuale
 
-**0% implementato.** Nessun modulo di rete esiste nel codice (verificato:
-nessun uso di `socket`/`asyncio` in `s32/` o `carts/`). Questo
-documento è il riferimento per quando affronteremo l'implementazione,
-uno step alla volta come da roadmap generale del progetto.
+**Implementato** (`s32/netplay.py`, testato in `s32/test_netplay.py` -
+4 peer simulati sulla stessa macchina via socket UDP su `127.0.0.1`,
+niente hardware/rete reale necessaria per i test):
+
+- `LobbyHost`/`LobbyClient`: discovery (broadcast o unicast diretto),
+  join, assegnazione slot 2-4, propagazione della lista peer a tutti.
+- `MatchSession.collect_frame_inputs()`: lo scambio P2P vero e proprio
+  - manda il proprio input a ogni altro slot e aspetta il loro prima
+  di lasciar procedere quel frame, con timeout esplicito
+  (`NetplayTimeout`) se un peer non risponde.
+- Lato CPU (`cpu.py`): 3 nuove porte `PORT_INPUT_P2/P3/P4` (oltre
+  all'esistente `PORT_INPUT` per il giocatore 1), lette da
+  ConsoleLang con la nuova espressione `peek(indirizzo)` (vedi
+  `doc_cl.md`, sezione 7bis) - la controparte in lettura di `poke()`.
+  `CPU.run()` accetta ora `input_p2/p3/p4` (default 0, retrocompatibile
+  con ogni chiamante esistente).
+- `carts/barebone_p2p/`: clone di `carts/barebone/` con 4 avatar
+  (lettere `p,q,r,s`), uno per slot, ognuno mosso dal proprio canale
+  di input - verificato headless (nessun bisogno di pygame per
+  testarlo, stesso principio del resto del motore).
+
+**NON ancora fatto** (prossimo step):
+
+- Integrazione nel loop di gioco vero (`launcher.py`/
+  `_run_pygame_loop`): oggi `netplay.py` esiste ed è testato in
+  isolamento, ma nessuna schermata di lobby lo usa ancora e il loop a
+  60fps non chiama `collect_frame_inputs()` - serve per giocare
+  DAVVERO in rete, non solo per verificare che il protocollo
+  funzioni.
+- Gestione disconnessione durante la partita (oggi: `NetplayTimeout`
+  interrompe, nessuna strategia di recovery/pausa).
+- UI di lobby (schermata "in attesa di N/4 giocatori...").
 
 ---
 

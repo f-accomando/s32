@@ -24,6 +24,14 @@ BG_PALETTE erano specifiche del meccanismo di cambio stanza di v1 -
 S32 non ha ancora un equivalente, la VRAM piu' grande apre altre
 strade non ancora decise). Verranno aggiunte quando quel meccanismo
 sara' progettato per S32, non prima.
+
+peek(indirizzo) - AGGIUNTO per il multiplayer locale (vedi
+carts/barebone_p2p/): la controparte in LETTURA di poke(), che esisteva
+gia' solo in scrittura. Serve perche' l'input dei giocatori 2-4 vive in
+normali celle di memoria (PORT_INPUT_P2/P3/P4 in cpu.py), non dietro un
+opcode dedicato come input() - senza peek() non c'era modo di leggerle
+da ConsoleLang. Stesso vincolo di poke(): indirizzo LETTERALE, niente
+indirizzamento indicizzato (la CPU non ce l'ha).
 """
 
 import re
@@ -47,7 +55,7 @@ TOKEN_RE = re.compile('|'.join(f'(?P<{n}>{p})' for n, p in TOKEN_SPEC))
 
 KEYWORDS = {'var', 'state', 'if', 'else', 'func', 'call', 'return', 'input',
             'regx', 'regy', 'clamp_x', 'clamp_y', 'write_oam', 'halt', 'poke',
-            'select_stage', 'set_scroll', 'play_sound'}
+            'peek', 'select_stage', 'set_scroll', 'play_sound'}
 
 
 def tokenize(src):
@@ -235,6 +243,16 @@ class Parser:
             return ('regx',)
         if val == 'regy':
             return ('regy',)
+        if val == 'peek':
+            self.expect('(')
+            if self.peek()[0] != 'NUMBER':
+                raise SyntaxError(
+                    'peek() richiede un indirizzo LETTERALE come argomento '
+                    '(la CPU non ha indirizzamento indicizzato - vedi doc_asm.md)'
+                )
+            addr = int(self.next()[1], 0)
+            self.expect(')')
+            return ('peek', addr)
         if kind == 'IDENT':
             return ('var_ref', val)
         raise SyntaxError(f'Espressione inattesa: {val!r}')
@@ -286,6 +304,8 @@ def describe_expr(expr):
         return 'regy'
     if tag == 'var_ref':
         return expr[1]
+    if tag == 'peek':
+        return f'peek({expr[1]})'
     if tag == 'binop':
         return f'{describe_expr(expr[2])} {expr[1]} {describe_expr(expr[3])}'
     if tag == 'lt':
@@ -374,7 +394,7 @@ class CodeGen:
             return ('imm', node[1])
         if node[0] == 'var_ref':
             return ('addr', self.var_addr(node[1]))
-        if node[0] in ('regx', 'regy', 'input'):
+        if node[0] in ('regx', 'regy', 'input', 'peek'):
             if not hasattr(self, '_rhs_temp_addr'):
                 self._rhs_temp_addr = self.alloc_var('__rhs_temp')
             self.gen_expr(node)
@@ -415,6 +435,8 @@ class CodeGen:
             self.emit('TYA')  # A = Y
         elif tag == 'var_ref':
             self.emit(f'LDA {self.var_addr(expr[1])}')
+        elif tag == 'peek':
+            self.emit(f'LDA {expr[1]}')
         elif tag == 'binop':
             op, left, right = expr[1], expr[2], expr[3]
             kind, val = self.resolve_rhs(right)

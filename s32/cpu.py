@@ -35,6 +35,21 @@ CALL_STACK_MAX_DEPTH = 256  # limite di sicurezza (JSR annidate), non
                              # di ricorsione di finire la memoria
 
 PORT_INPUT = 0x042000         # stessa porta INPUT della v1, nuovo indirizzo
+                               # (giocatore 1 - locale, tastiera)
+PORT_INPUT_P2 = 0x042005      # input dei giocatori 2-4 (vedi netplay.py
+PORT_INPUT_P3 = 0x042007      # e carts/barebone_p2p/) - a differenza di
+PORT_INPUT_P4 = 0x042009      # PORT_INPUT non hanno un opcode dedicato
+                               # (niente "IN2/IN3/IN4"): sono normali
+                               # celle di memoria nella zona porte, lette
+                               # con ConsoleLang tramite peek(indirizzo)
+                               # (vedi lang.py) o in assembly con un
+                               # semplice LDA - lo stesso bus flat che
+                               # permette a write_oam() di scrivere
+                               # DIRETTAMENTE in OAM senza porte indirette.
+                               # Spaziati di 2 byte (non 1, come PORT_INPUT)
+                               # perche' LDA legge 16 bit (read16, vedi
+                               # sotto): il byte alto di ognuna resta
+                               # sempre a zero, mai scritto da nessuno.
 PORT_STAGE_SELECT = 0x042001  # scrivere un numero di stage qui copia
                                # ISTANTANEAMENTE (nessun ciclo CPU in
                                # piu', come il DMA del vero SNES - vedi
@@ -449,9 +464,16 @@ class CPU:
             raise RuntimeError(f"Opcode sconosciuto: 0x{op:02X} a pc=0x{self.pc:06X}")
         return handler()
 
-    def run(self, start_pc, input_byte=0, max_steps=200000):
+    def run(self, start_pc, input_byte=0, input_p2=0, input_p3=0, input_p4=0, max_steps=200000):
+        """input_p2/p3/p4: input degli altri giocatori (vedi
+        PORT_INPUT_P2/P3/P4 sopra) - di default 0 (nessun tasto premuto),
+        cosi' ogni cartuccia/chiamante esistente che non li passa
+        continua a funzionare invariato."""
         self.pc = start_pc
         self.mem[PORT_INPUT] = input_byte
+        self.mem[PORT_INPUT_P2] = input_p2
+        self.mem[PORT_INPUT_P3] = input_p3
+        self.mem[PORT_INPUT_P4] = input_p4
         steps = 0
         while steps < max_steps:
             steps += 1
