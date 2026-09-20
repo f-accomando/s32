@@ -1280,14 +1280,42 @@ def start_netcode_host(port, num_players):
     bloccando finche' non si sono connessi tutti i giocatori. Estratta
     da main() apposta: la usano sia il flag CLI --netplay-host sia la
     schermata "Ospita partita" del menu OS (os_menu.py) - stessa
-    identica logica, un solo posto da mantenere."""
-    from netcode_lockstep import LockstepHost
+    identica logica, un solo posto da mantenere.
+
+    Annuncia la lobby sulla LAN per tutta l'attesa (LanAnnouncer, vedi
+    discover_netcode_hosts()) - cosi' chi si unisce dal menu OS non
+    deve conoscere a memoria l'IP dell'host, lo trova nella lista.
+    Smette di annunciare appena la partita parte (nessun nuovo
+    giocatore puo' comunque piu' unirsi una volta partiti)."""
+    from netcode_lockstep import LockstepHost, LanAnnouncer
     print(f"[netplay] host in ascolto sulla porta {port}, "
           f"aspetto {num_players} giocatori...")
-    session = LockstepHost(num_players=num_players, bind_port=port)
-    session.wait_for_players()
+    announcer = LanAnnouncer(game_name='S32', connect_port=port)
+    announcer.start()
+    try:
+        session = LockstepHost(num_players=num_players, bind_port=port)
+        session.wait_for_players()
+    finally:
+        announcer.stop()
     print("[netplay] tutti i giocatori connessi, si parte")
     return session, 0  # l'host e' sempre il giocatore 0
+
+
+def discover_netcode_hosts(duration_s=2.0):
+    """Ascolta gli annunci LAN (LanAnnouncer, vedi start_netcode_host)
+    per duration_s secondi, ritorna la lista degli host trovati
+    ({'ip','name','port'}) - usata dalla schermata "Unisciti a
+    partita" del menu OS per evitare di dover digitare un IP a mano
+    quando l'host e' sulla stessa rete locale. Lista vuota se nessuno
+    risponde (rete che blocca il broadcast, host non ancora in
+    attesa, o host su un'altra rete) - il chiamante ripiega
+    sull'inserimento manuale dell'IP, non e' un errore."""
+    from netcode_lockstep import LanBrowser
+    browser = LanBrowser()
+    try:
+        return browser.scan(duration_s=duration_s)
+    finally:
+        browser.close()
 
 
 def start_netcode_client(ip, port):

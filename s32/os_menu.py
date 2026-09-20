@@ -14,10 +14,18 @@ file resta importabile anche in un ambiente senza pygame installato
 (solo run_os_menu() lo usa davvero).
 
 FLUSSO (stati di run_os_menu, un semplice automa a stati):
-  grid  -> scegli una cartuccia (griglia di icone, navigazione 2D)
-  mode  -> "locale" / "ospita partita" / "unisciti a partita"
-  host  -> form (porta, numero giocatori) prima di ospitare
-  join  -> form (ip, porta) prima di unirsi
+  grid      -> scegli una cartuccia (griglia di icone, navigazione 2D)
+  mode      -> "locale" / "ospita partita" / "unisciti a partita"
+  host      -> form (porta, numero giocatori) prima di ospitare -
+               annuncia la lobby sulla LAN (LanAnnouncer, vedi
+               launcher.start_netcode_host) per tutta l'attesa
+  join_pick -> lista degli host trovati in automatico sulla rete
+               locale (LanBrowser, ~2s di scansione) + "inserisci IP
+               manualmente" - saltata a favore del form manuale se la
+               scansione non trova nessuno
+  join      -> form manuale (ip, porta) prima di unirsi - usato solo
+               se scelto esplicitamente da join_pick, o se la
+               scansione automatica non ha trovato nulla
 Da qualunque form, ESC torna allo stato precedente (non chiude il
 programma) - solo ESC/chiusura finestra dallo stato 'grid' chiude
 tutto. Dopo una partita (locale o in rete), si torna SEMPRE allo
@@ -178,7 +186,8 @@ def run_os_menu():
     TERMINE torna qui (stessa MenuState, stesso indice) finche'
     l'utente non chiude davvero la finestra. Si apre SEMPRE, anche
     senza cartucce trovate."""
-    from launcher import _init_pygame_once, run_direct, start_netcode_host, start_netcode_client
+    from launcher import (_init_pygame_once, run_direct, start_netcode_host,
+                          start_netcode_client, discover_netcode_hosts)
     pygame = _init_pygame_once()
 
     carts_dir = os.path.join(os.path.dirname(__file__), '..', 'carts')
@@ -200,10 +209,13 @@ def run_os_menu():
     host_focus = None
     join_fields = None
     join_focus = None
+    join_pick_menu = None
+    join_scan_results = []
     error_message = None
 
     while True:
-        action = None  # 'launch_local' | 'launch_host' | 'launch_join' | None
+        action = None  # 'launch_local' | 'launch_host' | 'scan_join' |
+                        # 'launch_join' | 'launch_join_direct' | None
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -251,11 +263,27 @@ def run_os_menu():
                         error_message = None
                         state = 'host'
                     else:
+                        action = 'scan_join'
+                        break
+
+            elif state == 'join_pick':
+                if event.key == pygame.K_ESCAPE:
+                    state = 'mode'
+                elif event.key in (pygame.K_UP, pygame.K_w):
+                    join_pick_menu.move_up()
+                elif event.key in (pygame.K_DOWN, pygame.K_s):
+                    join_pick_menu.move_down()
+                elif event.key in (pygame.K_RETURN, pygame.K_j, pygame.K_SPACE):
+                    if join_pick_menu.index == len(join_scan_results):
+                        # ultima voce: "inserisci IP manualmente"
                         join_fields = {'ip': TextField('', max_len=15, allowed=IP_CHARS),
                                        'porta': TextField('42420', max_len=5, allowed=DIGITS)}
                         join_focus = 'ip'
                         error_message = None
                         state = 'join'
+                    else:
+                        action = 'launch_join_direct'
+                        break
 
             elif state == 'host':
                 if event.key == pygame.K_ESCAPE:
@@ -328,6 +356,29 @@ def run_os_menu():
             state = 'grid'
             continue
 
+        if action == 'scan_join':
+            screen.fill((18, 18, 26))
+            _draw_list_screen(screen, fonts[0], fonts[2], "Cerco partite sulla rete locale...", MenuState([]))
+            pygame.display.flip()
+            join_scan_results = discover_netcode_hosts(duration_s=2.0)
+            if join_scan_results:
+                labels = [f"{h.get('name', '?')}  ({h['ip']}:{h['port']})" for h in join_scan_results]
+                labels.append("Inserisci IP manualmente...")
+                join_pick_menu = MenuState(labels)
+                error_message = None
+                state = 'join_pick'
+            else:
+                # nessun host trovato (rete che blocca il broadcast, host
+                # su un'altra rete, o nessuno ancora in ascolto) - si
+                # ripiega SUBITO sull'inserimento manuale, non e' un
+                # vicolo cieco
+                join_fields = {'ip': TextField('', max_len=15, allowed=IP_CHARS),
+                               'porta': TextField('42420', max_len=5, allowed=DIGITS)}
+                join_focus = 'ip'
+                error_message = "Nessuna partita trovata in automatico - inserisci l'IP a mano"
+                state = 'join'
+            continue
+
         if action == 'launch_join':
             ip = join_fields['ip'].value
             try:
@@ -363,6 +414,29 @@ def run_os_menu():
             state = 'grid'
             continue
 
+        if action == 'launch_join_direct':
+            host = join_scan_results[join_pick_menu.index]
+            ip, porta = host['ip'], host['port']
+            screen.fill((18, 18, 26))
+            _draw_list_screen(screen, fonts[0], fonts[2], f"Mi connetto a {ip}:{porta}...", MenuState([]))
+            pygame.display.flip()
+            try:
+                netcode_session, local_idx = start_netcode_client(ip, porta)
+            except (ValueError, TimeoutError, OSError) as exc:
+                error_message = str(exc)
+                state = 'join_pick'
+                continue
+            entry, kind = _entry_and_kind(chosen_cart)
+            quit_requested = run_direct(entry, kind, quit_pygame_at_end=False,
+                                         netcode_session=netcode_session, local_player_index=local_idx)
+            netcode_session.close()
+            screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
+            if quit_requested:
+                pygame.quit()
+                return
+            state = 'grid'
+            continue
+
         # -- disegno --
         screen.fill((18, 18, 26))
         if state == 'grid':
@@ -374,6 +448,8 @@ def run_os_menu():
                                [('Porta', 'porta', host_fields['porta']),
                                 ('Numero giocatori', 'giocatori', host_fields['giocatori'])],
                                host_focus, error_message)
+        elif state == 'join_pick':
+            _draw_list_screen(screen, fonts[0], fonts[2], "Partite trovate sulla rete locale:", join_pick_menu)
         elif state == 'join':
             _draw_form_screen(screen, fonts[0], fonts[2], fonts[1], "Unisciti a partita",
                                [('IP host', 'ip', join_fields['ip']),

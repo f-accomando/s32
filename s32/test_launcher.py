@@ -714,6 +714,100 @@ check("netcode: un frame in lag viene ririchiesto esattamente (tentativi_lag + 1
 check("netcode: dopo il lag simulato, la sessione arriva a richiedere frame successivi (la simulazione riprende)",
       max(_sessione_netcode.richieste) > 0, True)
 
+# ---------------------------------------------------------------
+# Test 14: start_netcode_host() annuncia sulla LAN (LanAnnouncer) per
+# tutta l'attesa - aggiunto dopo che l'utente ha chiesto "come faccio
+# a sapere l'IP dell'host per unirmi?": la risposta e' che l'host lo
+# annuncia da solo in broadcast, vedi anche discover_netcode_hosts()
+# e os_menu.py (schermata "Unisciti a partita").
+# ---------------------------------------------------------------
+import netcode_lockstep as _ncl
+
+class _FakeAnnouncer:
+    instances = []
+    def __init__(self, game_name, connect_port):
+        self.game_name = game_name
+        self.connect_port = connect_port
+        self.started = False
+        self.stopped = False
+        _FakeAnnouncer.instances.append(self)
+    def start(self):
+        self.started = True
+    def stop(self):
+        self.stopped = True
+
+class _FakeHostSession:
+    def __init__(self, num_players, bind_port):
+        self.num_players = num_players
+        self.bind_port = bind_port
+    def wait_for_players(self):
+        pass
+
+_orig_LockstepHost = _ncl.LockstepHost
+_orig_LanAnnouncer = _ncl.LanAnnouncer
+_ncl.LockstepHost = _FakeHostSession
+_ncl.LanAnnouncer = _FakeAnnouncer
+try:
+    _FakeAnnouncer.instances.clear()
+    _sessione_host, _idx_host = launcher.start_netcode_host(12345, 3)
+    check("start_netcode_host: ritorna sempre local_player_index=0 (l'host)", _idx_host, 0)
+    check("start_netcode_host: crea UN LanAnnouncer con la porta giusta",
+          (len(_FakeAnnouncer.instances), _FakeAnnouncer.instances[0].connect_port), (1, 12345))
+    check("start_netcode_host: annuncia PRIMA/DURANTE l'attesa (start chiamato)",
+          _FakeAnnouncer.instances[0].started, True)
+    check("start_netcode_host: smette di annunciare una volta partiti (stop chiamato)",
+          _FakeAnnouncer.instances[0].stopped, True)
+finally:
+    _ncl.LockstepHost = _orig_LockstepHost
+    _ncl.LanAnnouncer = _orig_LanAnnouncer
+
+# l'annuncio va fermato ANCHE se wait_for_players() fallisce - mai
+# lasciare un annuncio "fantasma" in broadcast se qualcosa va storto
+class _FakeHostSessionCheFallisce(_FakeHostSession):
+    def wait_for_players(self):
+        raise TimeoutError("nessuno si e' unito in tempo")
+
+_ncl.LockstepHost = _FakeHostSessionCheFallisce
+_ncl.LanAnnouncer = _FakeAnnouncer
+try:
+    _FakeAnnouncer.instances.clear()
+    try:
+        launcher.start_netcode_host(12345, 2)
+        check("start_netcode_host: propaga l'eccezione di wait_for_players", "nessun errore", "TimeoutError")
+    except TimeoutError:
+        check("start_netcode_host: propaga l'eccezione di wait_for_players", "TimeoutError", "TimeoutError")
+    check("start_netcode_host: annuncio fermato ANCHE se wait_for_players fallisce",
+          _FakeAnnouncer.instances[0].stopped, True)
+finally:
+    _ncl.LockstepHost = _orig_LockstepHost
+    _ncl.LanAnnouncer = _orig_LanAnnouncer
+
+# ---------------------------------------------------------------
+# Test 15: discover_netcode_hosts() - scansione LAN lato client
+# ---------------------------------------------------------------
+class _FakeBrowser:
+    instances = []
+    def __init__(self):
+        self.closed = False
+        _FakeBrowser.instances.append(self)
+    def scan(self, duration_s):
+        self.scanned_for = duration_s
+        return [{'ip': '192.168.1.50', 'name': 'S32', 'port': 42420}]
+    def close(self):
+        self.closed = True
+
+_orig_LanBrowser = _ncl.LanBrowser
+_ncl.LanBrowser = _FakeBrowser
+try:
+    _FakeBrowser.instances.clear()
+    _risultati_scan = launcher.discover_netcode_hosts(duration_s=1.5)
+    check("discover_netcode_hosts: ritorna gli host trovati da LanBrowser.scan()",
+          _risultati_scan, [{'ip': '192.168.1.50', 'name': 'S32', 'port': 42420}])
+    check("discover_netcode_hosts: passa duration_s a scan()", _FakeBrowser.instances[0].scanned_for, 1.5)
+    check("discover_netcode_hosts: chiude sempre il browser dopo", _FakeBrowser.instances[0].closed, True)
+finally:
+    _ncl.LanBrowser = _orig_LanBrowser
+
 print()
 if fails == 0:
     print("Tutti i test passati.")

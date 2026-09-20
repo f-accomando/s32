@@ -71,8 +71,13 @@ non-problema.
 - `LockstepClient()` - `connect(host_ip, host_port)` per l'handshake
   (riceve il proprio `player_index` dall'host), stessa coppia
   `submit_local_input`/`get_frame_inputs` lato client.
-- `LanAnnouncer`/`LanBrowser` - discovery via broadcast UDP, facoltativa
-  (serve solo a trovare un host sulla LAN senza digitare un IP a mano).
+- `LanAnnouncer`/`LanBrowser` - discovery via broadcast UDP.
+  **Collegata** (vedi `s32/launcher.py` sotto e `os_menu.py`): l'host
+  annuncia la lobby per tutta l'attesa, chi si unisce dal menu OS la
+  trova in automatico senza dover conoscere l'IP - il form manuale
+  resta come ripiego (rete che blocca il broadcast, o IP/porta gia'
+  noti). Da riga di comando (`--netplay-join`) l'IP va ancora dato a
+  mano - la scoperta automatica e' cablata solo nel menu OS per ora.
 
 ### `s32/cpu.py`
 
@@ -105,6 +110,24 @@ non-problema.
   --netplay-host <porta> <num_giocatori>
   --netplay-join <ip> <porta>
   ```
+- `start_netcode_host(port, num_players)` / `start_netcode_client(ip,
+  port)`: costruiscono LockstepHost/LockstepClient - riusate sia dai
+  flag CLI sia dal menu OS (`os_menu.py`), un solo posto da mantenere.
+  `start_netcode_host` avvia anche un `LanAnnouncer` per tutta
+  l'attesa (fermato non appena i giocatori sono connessi).
+- `discover_netcode_hosts(duration_s=2.0)`: usa `LanBrowser` per
+  cercare host annunciati sulla LAN - usata dal menu OS prima di
+  chiedere un IP a mano (vedi sotto, `os_menu.py`).
+
+### `s32/os_menu.py`
+
+Il menu di avvio: scelta cartuccia -> Locale/Ospita/Unisciti. Per
+"Unisciti a partita in rete", cerca prima automaticamente sulla LAN
+(`discover_netcode_hosts`, ~2s) e mostra la lista degli host trovati -
+selezionandone uno ci si collega direttamente, **senza dover sapere
+l'IP a mano**. Se la scansione non trova nulla (rete che blocca il
+broadcast, host su un'altra rete), ripiega sul form manuale
+(IP/porta). Vedi `README.md`, sezione sul mini-OS, per i dettagli.
 
 ### `carts/barebone_p2p/`
 
@@ -130,9 +153,12 @@ lockstep), nessuna integrazione richiesta finora.
 
 - **Mai verificato su due macchine fisiche diverse** - solo
   host+client sulla stessa macchina via loopback.
-- **Nessuna UI/HUD** per lo stato della connessione durante il gioco
-  (solo messaggi in console all'avvio - "in attesa di N/M
-  giocatori...", una schermata di lobby vera non esiste).
+- **La schermata "Ospita partita" resta bloccata e statica** durante
+  `wait_for_players()` - mostra "in attesa di N giocatori..." ma non
+  aggiorna la lista via via che qualcuno si unisce (nessun evento
+  pygame elaborato in quella fase, stessa limitazione gia' presente
+  nei flag CLI). Idem nessun HUD DURANTE la partita per lo stato della
+  connessione (latenza, frame persi).
 - **`netcode_mmo.py` non integrato** - disponibile per un progetto
   futuro che ne avesse bisogno.
 - **Gestione disconnessione a partita in corso** non specificata -
@@ -155,9 +181,11 @@ lockstep), nessuna integrazione richiesta finora.
   lento a bloccare tutti) - a quel punto lo scheletro client-server
   autoritativo già presente in `netcode_mmo.py` è il punto di
   partenza naturale, non il lockstep.
-- **UI di lobby**: una schermata reale (non solo messaggi console) che
-  mostri chi si è connesso e permetta di avviare la partita quando
-  pronti.
+- **UI di lobby "viva"**: la schermata "Ospita partita" del menu OS
+  (`os_menu.py`) esiste già, ma resta statica durante l'attesa (vedi
+  sezione 4) - aggiornarla in tempo reale (chi si è connesso finora)
+  richiederebbe rendere `wait_for_players()` non bloccante o pollarla
+  a pezzi dal loop di disegno.
 - **Replay/salvataggi**: essendo la simulazione deterministica,
   registrare la sola sequenza di input di tutti gli slot (frame per
   frame) basta a riprodurre l'intera partita - stesso principio già
