@@ -14,9 +14,10 @@ carts/nome_gioco/
   cart_info.py      <- opzionale: TITLE = "Nome mostrato nel menu"
                        (senza, si usa il nome della cartella)
   cart.py            <- opzionale: build_vram(vram), build_cgram(cgram),
-                       build_oam(oam) per il contenuto grafico iniziale
-  graphics/*.png      <- risorse grafiche vere (png_tool, da riportare
-                       da v1 quando servirà)
+                       build_oam(oam), build_stages(dict) per il
+                       contenuto grafico iniziale
+  *.png               <- spritesheet (uno o più), tile_size x tile_size
+                       per cella - vedi spritesheet_tool.py
 ```
 
 `game.py` deve esporre:
@@ -24,6 +25,24 @@ carts/nome_gioco/
   `SOURCE_LANG`  - `'asm'` oppure `'consolelang'`
 
 `game.asm` è invece SEMPRE assembly puro (l'estensione lo dice già).
+
+### Convenzione single-file (nuova, vedi `carts/barebone/`)
+
+Una cartuccia può essere **un solo file `game.py`** (più gli eventuali
+spritesheet `.png`) - niente `cart.py` né `cart_info.py` separati:
+
+```
+carts/nome_gioco/
+  game.py       <- ROM_SOURCE + SOURCE_LANG + (opzionale) TITLE,
+                   build_vram/build_cgram/build_oam/build_stages
+  font.png      <- spritesheet, unico asset non-Python ammesso
+```
+
+Il motore cerca `cart.py`/`cart_info.py` per primi (retro-compatibilità
+con `adventure_cl`/`adventure_asm`); se assenti, cerca le stesse cose
+dentro `game.py`. Nessuna cartella `_shared/`: ogni cartuccia è
+autosufficiente, tutte le risorse (incluse quelle grafiche) stanno
+nella sua cartella.
 
 ## Avvio
 

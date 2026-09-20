@@ -101,9 +101,13 @@ def load_cart_rom(entry_path, kind):
 
 
 def _load_cart_graphics(cpu, cart_dir):
-    """Se la cartuccia ha un cart.py con build_vram/build_cgram/
-    build_oam, li usa per inizializzare la grafica. Altrimenti lascia
-    VRAM/CGRAM a zero (schermo nero, nessun crash).
+    """Se la cartuccia ha un cart.py (convenzione classica) con
+    build_vram/build_cgram/build_oam/build_stages, li usa per
+    inizializzare la grafica. Se NON c'e' cart.py ma c'e' un game.py
+    (convenzione single-file, vedi carts/barebone/), le stesse funzioni
+    vengono cercate li' - una cartuccia single-file non ha un cart.py
+    separato, tutto vive in game.py. Se non trova ne' l'uno ne' l'altro,
+    lascia VRAM/CGRAM a zero (schermo nero, nessun crash).
 
     L'OAM viene SEMPRE inizializzata con tutti gli sprite NASCOSTI
     (Y=0xffff) prima di tutto - bug reale trovato profilando su
@@ -126,9 +130,14 @@ def _load_cart_graphics(cpu, cart_dir):
     cpu.mem[OAM_BASE:OAM_BASE + OAM_SIZE] = make_hidden_oam()
 
     cart_py_path = os.path.join(cart_dir, 'cart.py')
-    if not os.path.isfile(cart_py_path):
+    game_py_path = os.path.join(cart_dir, 'game.py')
+    if os.path.isfile(cart_py_path):
+        graphics_path = cart_py_path
+    elif os.path.isfile(game_py_path):
+        graphics_path = game_py_path
+    else:
         return
-    module = _import_module_from_path(cart_py_path, 'cart_graphics_tmp')
+    module = _import_module_from_path(graphics_path, 'cart_graphics_tmp')
     if hasattr(module, 'build_vram'):
         vram = bytearray(VRAM_SIZE)
         module.build_vram(vram)

@@ -14,6 +14,13 @@ CONVENZIONE per una cartuccia valida (una sottocartella di carts/):
                       nome della cartella (con underscore -> spazi,
                       prima lettera maiuscola)
 
+CARTUCCIA SINGLE-FILE (nuova convenzione, vedi carts/barebone/): se
+non c'e' cart_info.py, TITLE puo' essere definito direttamente dentro
+game.py - stesso discorso per build_vram/build_cgram/build_oam/
+build_stages al posto di cart.py (vedi launcher._load_cart_graphics).
+Una cartuccia del genere e' fatta di UN SOLO file Python (piu' gli
+eventuali spritesheet .png) - niente cart.py/cart_info.py separati.
+
 Questo modulo NON usa pygame e NON esegue nulla - solo scoperta e
 metadati, per restare interamente testabile senza un display.
 """
@@ -47,10 +54,11 @@ def _default_title(folder_name):
     return folder_name.replace('_', ' ').replace('-', ' ').strip().title()
 
 
-def _read_title_from_cart_info(cart_info_path):
-    """Legge la variabile TITLE da cart_info.py SENZA eseguire il
-    resto del modulo come side-effect involontario - import mirato."""
-    spec = importlib.util.spec_from_file_location('cart_info_tmp', cart_info_path)
+def _read_title_from_module(module_path):
+    """Legge la variabile TITLE da un modulo Python (cart_info.py, o
+    game.py per una cartuccia single-file) - import mirato, non tocca
+    sys.modules."""
+    spec = importlib.util.spec_from_file_location('cart_title_tmp', module_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return getattr(module, 'TITLE', None)
@@ -77,8 +85,15 @@ def discover_carts(carts_dir):
 
         title = _default_title(entry)
         cart_info_path = os.path.join(full_path, 'cart_info.py')
+        game_py_path = os.path.join(full_path, 'game.py')
         if os.path.isfile(cart_info_path):
-            custom_title = _read_title_from_cart_info(cart_info_path)
+            custom_title = _read_title_from_module(cart_info_path)
+            if custom_title:
+                title = custom_title
+        elif has_py:
+            # cartuccia single-file (niente cart_info.py separato):
+            # TITLE, se definito, vive direttamente in game.py
+            custom_title = _read_title_from_module(game_py_path)
             if custom_title:
                 title = custom_title
 
