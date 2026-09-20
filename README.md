@@ -1735,3 +1735,41 @@ texture sola aiuterebbe. Da lanciare con `python3
 s32/bench_gpu_draw.py` sulla Pi 1 vera (qui in sviluppo i numeri non
 sono comparabili, nessuna GPU reale disponibile). Dettagli completi
 nell'issue #24 su GitHub.
+
+## Correzione dopo la prima misura reale: la causa non erano gli sprite, era lo sfondo
+
+Il primo giro di `bench_gpu_draw.py` sulla Pi 1 vera ha dato un
+risultato che NON tornava: disegnare 7 tile 32x32 in isolamento
+costava solo ~1.7ms, contro i ~12-14ms misurati per `draw_sprites`
+nel gioco vero - un fattore ~7x di differenza, troppo grande per
+essere spiegato da rumore di misura.
+
+**Causa trovata rileggendo il codice, non ipotizzando**: la voce
+`draw_sprites` in `GpuRenderer.render()` (`s32/launcher.py`) misurava
+`t6 - t4`, un intervallo che includeva - oltre al loop degli sprite -
+ANCHE `renderer.clear()` e `self.bg_texture.draw(dstrect=(0, 0,
+SCREEN_W_PX, SCREEN_H_PX))`: il disegno dell'INTERO sfondo a schermo
+pieno (480x320 = 153.600 pixel), un'area ~150 volte piu' grande di un
+singolo tile 32x32 (1.024 pixel) - nascosto sotto un'etichetta che
+suggeriva "sono gli sprite". Un errore di misura proprio, non
+dell'utente: l'etichetta esisteva da prima di iniziare a
+indagare #24.
+
+**Corretto**: il timing ora si divide in `clear`, `bg_draw` (il
+disegno dello sfondo) e `sprite_draws` (solo il loop degli sprite),
+tre voci separate invece di una sola - senza questo dettaglio non si
+puo' distinguere "il problema e' lo sfondo" da "il problema sono gli
+sprite". `bench_gpu_draw.py` ora misura ANCHE il costo di un draw()
+480x320 (come fa `bg_texture.draw()`) da solo e insieme a una manciata
+di sprite, per confermare l'ipotesi con dati reali invece che per
+deduzione. Anche nell'ambiente di sviluppo (nessuna GPU vera,
+renderer software) lo sfondo intero costa gia' ~10x un tile piccolo -
+coerente con un costo che scala con l'AREA disegnata (fill rate), non
+con il numero di chiamate `draw()` - a conferma che il vero
+sospettato e' il draw dello sfondo, non i pochi sprite.
+
+Prossimo passo: l'utente rilancia `bench_gpu_draw.py` aggiornato sulla
+Pi 1 vera per confermare quanto pesa DAVVERO lo sfondo la' - se e'
+confermato, l'ottimizzazione da seguire e' ridurre il costo del draw
+dello sfondo (es. dirty-rect anche per il draw finale, non solo per
+`texture_update`), non piu' l'atlas sprite (gia' a posto).

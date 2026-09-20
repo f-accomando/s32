@@ -6,7 +6,7 @@ frame - vedi test_launcher.py e README.md per il contesto completo).
 Il gioco vero mischia SEMPRE draw_sprites con CPU, scroll, audio -
 impossibile isolare da li' quanto costa DAVVERO una singola chiamata
 Texture.draw() sulla GPU del Pi. Questo script misura SOLO quello,
-per rispondere a due domande concrete:
+per rispondere a tre domande concrete:
 
   1. Quanto costa un Texture.draw() da solo, senza nient'altro
      intorno? (numero -> se e' alto anche qui, e' un costo FISSO
@@ -16,6 +16,18 @@ per rispondere a due domande concrete:
      UN SOLO draw(), invece di N draw() separati dall'atlas? Lo
      script disegna lo STESSO NUMERO di pixel nei due modi e
      confronta.
+  3. NUOVO (dopo il primo giro di misure reali sulla Pi 1, vedi
+     README.md): il primo giro mostrava che disegnare 7 tile 32x32
+     costa solo ~1.7ms in isolamento - una FRAZIONE dei ~12-14ms
+     misurati per la voce 'draw_sprites' nel gioco vero. Motivo
+     trovato RILEGGENDO il codice sorgente: quella voce, prima di
+     questa versione dello script, includeva ANCHE renderer.clear()
+     e il draw dell'INTERO sfondo (480x320, un'area ~150 volte piu'
+     grande di un tile 32x32), non solo gli sprite - un'etichetta
+     fuorviante gia' corretta in launcher.py (ora clear/bg_draw/
+     sprite_draws sono tre timing separati). Questa funzione misura
+     ESATTAMENTE quella nuova ipotesi: il costo di disegnare lo
+     sfondo a schermo intero, isolato dagli sprite.
 
 Uso: python3 bench_gpu_draw.py  (lanciarlo SULLA Pi 1 vera - qui in
 sviluppo i numeri non sono comparabili, nessuna GPU reale disponibile
@@ -104,6 +116,37 @@ def main():
         renderer.present()
     ms_1tile_grande = _timeit("clear()+1 draw(64x64) [entita' precomposta]+present()", _un_tile_grande)
 
+    # -- DOMANDA 3 (nuova): quanto costa disegnare lo SFONDO a schermo
+    # intero (480x320, come fa bg_texture.draw() nel gioco vero), da
+    # solo e insieme a una manciata di sprite - per capire se il vero
+    # costo di 'draw_sprites' nel gioco (~12-14ms su Pi 1 reale) viene
+    # dallo sfondo o dagli sprite --
+    bg_surf = pygame.Surface((480, 320))
+    for y in range(0, 320, 32):
+        for x in range(0, 480, 32):
+            colore = (120, 90, 40) if (x // 32 + y // 32) % 2 == 0 else (140, 100, 50)
+            bg_surf.fill(colore, rect=(x, y, 32, 32))
+    bg_tex = video.Texture(renderer, (480, 320), target=True)
+    bg_tex.update(bg_surf)
+
+    def _solo_sfondo():
+        renderer.clear()
+        bg_tex.draw(dstrect=(0, 0, 480, 320))
+        renderer.present()
+    ms_solo_sfondo = _timeit("clear()+1 draw(480x320, SFONDO INTERO)+present()", _solo_sfondo)
+
+    N_SPRITE_REALISTICO = 7  # dato reale dal gioco: 3-7 sotto-tile/frame durante lo scroll
+
+    def _sfondo_piu_sprite():
+        renderer.clear()
+        bg_tex.draw(dstrect=(0, 0, 480, 320))
+        for i in range(N_SPRITE_REALISTICO):
+            tile_tex.draw(dstrect=(i * 32, 0, 32, 32))
+        renderer.present()
+    ms_sfondo_piu_sprite = _timeit(
+        f"clear()+1 draw(480x320 sfondo)+{N_SPRITE_REALISTICO} draw(32x32 sprite)+present() [sequenza REALE]",
+        _sfondo_piu_sprite)
+
     print()
     print("=== riepilogo ===")
     print(f"overhead fisso di clear()+present() da soli: {ms_baseline:.3f} ms")
@@ -113,6 +156,15 @@ def main():
     print(f"4 tile separati: {ms_4tile:.3f} ms  vs  1 tile precomposto equivalente: {ms_1tile_grande:.3f} ms "
           f"-> {'CONVIENE precomporre' if risparmio > 0.1 else 'NESSUN vantaggio significativo'} "
           f"({pct:.0f}% se positivo)")
+    costo_sfondo = ms_solo_sfondo - ms_baseline
+    costo_sfondo_piu_sprite = ms_sfondo_piu_sprite - ms_baseline
+    print(f"costo dello SFONDO INTERO (480x320) da solo: {costo_sfondo:.3f} ms oltre il baseline")
+    print(f"costo sfondo+{N_SPRITE_REALISTICO} sprite insieme (sequenza reale del gioco): "
+          f"{costo_sfondo_piu_sprite:.3f} ms oltre il baseline")
+    if costo_sfondo > 0 and costo_sfondo_piu_sprite > 0:
+        quota_sfondo_pct = costo_sfondo / costo_sfondo_piu_sprite * 100
+        commento = "e' quindi il vero collo di bottiglia" if quota_sfondo_pct > 50 else "gli sprite restano una quota significativa"
+        print(f"-> lo SFONDO da solo spiega circa il {quota_sfondo_pct:.0f}% del costo combinato ({commento})")
     print()
     print("Incolla questo intero output com'e' per l'analisi.")
 
