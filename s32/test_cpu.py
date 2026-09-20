@@ -1,4 +1,4 @@
-from cpu import CPU
+from cpu import CPU, PORT_INPUT
 from memory_map import FLAG_ZERO, FLAG_NEGATIVE, FLAG_CARRY, FLAG_OVERFLOW, WRAM_END
 
 fails = 0
@@ -303,6 +303,64 @@ check("PORT_SCROLL_X aggiorna cpu.scroll_x", c26.scroll_x, 100)
 check("PORT_SCROLL_Y aggiorna cpu.scroll_y", c26.scroll_y, 250)
 c26.write16(0x001000, 4660)
 check("scritture normali continuano a funzionare dopo SCROLL_X/Y", c26.read16(0x001000), 4660)
+
+# ---------------------------------------------------------------
+# Test 16: porte input multiplayer (EXTRA_INPUT_PORTS/ALL_INPUT_PORTS)
+# ---------------------------------------------------------------
+from cpu import EXTRA_INPUT_PORTS, ALL_INPUT_PORTS, PORT_SOUND
+from memory_map import WRAM_BASE
+
+check("EXTRA_INPUT_PORTS: 7 porte (giocatori 2-8)", len(EXTRA_INPUT_PORTS), 7)
+check("ALL_INPUT_PORTS: PORT_INPUT + le 7 extra = 8 totali", len(ALL_INPUT_PORTS), 8)
+check("ALL_INPUT_PORTS: PORT_INPUT e' il primo elemento", ALL_INPUT_PORTS[0], PORT_INPUT)
+check("EXTRA_INPUT_PORTS: nessun indirizzo duplicato", len(set(ALL_INPUT_PORTS)), 8)
+check("EXTRA_INPUT_PORTS: non confligge con le porte esistenti (SCROLL/SOUND/STAGE)",
+      set(EXTRA_INPUT_PORTS) & {PORT_STAGE_SELECT, PORT_SCROLL_X, PORT_SCROLL_Y, PORT_SOUND}, set())
+
+c27 = CPU()
+for i, porta in enumerate(ALL_INPUT_PORTS):
+    check(f"read_mem riconosce la porta input del giocatore {i} (0x{porta:06X})",
+          c27.read_mem(porta), 0)
+
+c27.mem[0x2000] = 0x01  # HALT - basta un'istruzione per verificare solo le porte, non serve una ROM vera
+c27.run(0x2000, input_byte=0x11, extra_inputs=(0x22, 0x33))
+check("run(): input_byte finisce su PORT_INPUT (giocatore 0)", c27.mem[PORT_INPUT], 0x11)
+check("run(): extra_inputs[0] finisce sulla porta del giocatore 1",
+      c27.mem[EXTRA_INPUT_PORTS[0]], 0x22)
+check("run(): extra_inputs[1] finisce sulla porta del giocatore 2",
+      c27.mem[EXTRA_INPUT_PORTS[1]], 0x33)
+check("run(): le porte dei giocatori 3-7 restano a zero se extra_inputs e' piu' corto",
+      all(c27.mem[p] == 0 for p in EXTRA_INPUT_PORTS[2:]), True)
+
+c28 = CPU()
+c28.mem[0x2000] = 0x01  # HALT
+n_passi = c28.run(0x2000, input_byte=0x05)
+check("run(): senza extra_inputs (chiamata come sempre) continua a funzionare invariata",
+      c28.mem[PORT_INPUT], 0x05)
+check("run(): extra_inputs=None non tocca nessuna porta extra",
+      all(c28.mem[p] == 0 for p in EXTRA_INPUT_PORTS), True)
+
+c29 = CPU()
+c29.mem[0x2000] = 0x01  # HALT
+c29.run(0x2000, input_byte=0x300)  # valore fuori range di un byte
+check("run(): input_byte viene mascherato a 8 bit (& 0xff)", c29.mem[PORT_INPUT], 0x00)
+
+# ---------------------------------------------------------------
+# Test 17: state_checksum() - per rilevare disallineamenti in rete
+# ---------------------------------------------------------------
+c30 = CPU()
+somma1 = c30.state_checksum()
+somma2 = c30.state_checksum()
+check("state_checksum: deterministico (stesso stato -> stesso checksum)", somma1, somma2)
+
+c30.write16(WRAM_BASE, 12345)
+somma3 = c30.state_checksum()
+check("state_checksum: cambia se cambia la WRAM", somma3 != somma1, True)
+
+c31 = CPU()
+c31.write16(WRAM_BASE, 12345)
+check("state_checksum: due CPU con la STESSA WRAM danno lo STESSO checksum (base del confronto in rete)",
+      c31.state_checksum(), somma3)
 
 print()
 if fails == 0:

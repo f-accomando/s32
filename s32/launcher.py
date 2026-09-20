@@ -102,8 +102,9 @@ def load_cart_rom(entry_path, kind):
 
 def _load_cart_graphics(cpu, cart_dir):
     """Se la cartuccia ha un cart.py con build_vram/build_cgram/
-    build_oam, li usa per inizializzare la grafica. Altrimenti lascia
-    VRAM/CGRAM a zero (schermo nero, nessun crash).
+    build_oam/build_sound_bank, li usa per inizializzare grafica e
+    audio. Altrimenti lascia VRAM/CGRAM a zero (schermo nero) e
+    cpu.sound_bank vuoto (nessun suono) - nessun crash.
 
     L'OAM viene SEMPRE inizializzata con tutti gli sprite NASCOSTI
     (Y=0xffff) prima di tutto - bug reale trovato profilando su
@@ -124,6 +125,9 @@ def _load_cart_graphics(cpu, cart_dir):
         return oam
 
     cpu.mem[OAM_BASE:OAM_BASE + OAM_SIZE] = make_hidden_oam()
+    cpu.sound_bank = {}  # default: nessun suono - una cartuccia senza
+                          # build_sound_bank() gioca muta, non crasha
+                          # (stesso principio di VRAM/CGRAM a zero sopra)
 
     cart_py_path = os.path.join(cart_dir, 'cart.py')
     if not os.path.isfile(cart_py_path):
@@ -143,9 +147,19 @@ def _load_cart_graphics(cpu, cart_dir):
         cpu.mem[OAM_BASE:OAM_BASE + OAM_SIZE] = oam
     if hasattr(module, 'build_stages'):
         cpu.stages = module.build_stages()
+    if hasattr(module, 'build_sound_bank'):
+        # IL BANCO SUONI E' CONTENUTO DELLA CARTUCCIA, NON DELLA
+        # CONSOLE - quali suoni esistono e cosa significano (attacco,
+        # ferita, ecc.) appartiene al gioco, esattamente come lo
+        # spritesheet. audio.py (s32/) resta solo l'"hardware": i
+        # generatori di forma d'onda (square_wave/sweep_wave/noise),
+        # riusabili da QUALSIASI cartuccia. Corretto dopo che l'utente
+        # ha notato che i suoni di Adventure erano finiti per errore
+        # dentro il motore invece che nella cartuccia.
+        cpu.sound_bank = module.build_sound_bank()
 
 
-def run_direct(path, kind, show_stats=False, quit_pygame_at_end=True, renderer_mode='dirty-rects', fullscreen=False, use_audio=False, playtest=False, playtest_quick=False):
+def run_direct(path, kind, show_stats=False, quit_pygame_at_end=True, renderer_mode='dirty-rects', fullscreen=False, use_audio=False, playtest=False, playtest_quick=False, netcode_session=None, local_player_index=0):
     """Bypassa il menu, carica ed esegue direttamente la cartuccia
     data - stesso comportamento immediato della v1 (python3 main.py)."""
     if not os.path.isfile(path):
@@ -168,7 +182,8 @@ def run_direct(path, kind, show_stats=False, quit_pygame_at_end=True, renderer_m
 
     _run_pygame_loop(cpu, show_stats=show_stats, quit_pygame_at_end=quit_pygame_at_end,
                       renderer_mode=renderer_mode, fullscreen=fullscreen,
-                      use_audio=use_audio, playtest=playtest, playtest_quick=playtest_quick)
+                      use_audio=use_audio, playtest=playtest, playtest_quick=playtest_quick,
+                      netcode_session=netcode_session, local_player_index=local_player_index)
 
 
 def _init_pygame_once():
@@ -749,13 +764,22 @@ class AudioPlayer:
     Se non abilitato, enabled resta False e play_queue() non fa nulla:
     il costo a frame e' un confronto booleano."""
 
-    def __init__(self, pygame, enabled):
+    def __init__(self, pygame, enabled, sound_bank=None):
         self.pygame = pygame
         self.enabled = False
         self.sounds = {}
         if not enabled:
             print("[audio] disattivato: --no-audio sulla riga di comando")
             return
+        # IL BANCO SUONI E' CONTENUTO DELLA CARTUCCIA (vedi
+        # _load_cart_graphics/cpu.sound_bank), non della console -
+        # AudioPlayer non lo costruisce piu' da solo, lo riceve gia'
+        # pronto. Una cartuccia senza build_sound_bank() passa un
+        # dict vuoto: il mixer si inizializza comunque (il gioco puo'
+        # ancora emettere ID su PORT_SOUND in futuro), semplicemente
+        # non c'e' nulla da suonare finche' non viene aggiunto.
+        if sound_bank is None:
+            sound_bank = {}
         try:
             pygame.mixer.init(frequency=audio.SAMPLE_RATE, size=-16,
                                channels=1, buffer=1024)
@@ -774,11 +798,7 @@ class AudioPlayer:
             if actual != atteso:
                 print(f"[audio] formato negoziato {actual} diverso dal "
                       f"richiesto {atteso} - adatto i campioni ({actual_channels} canali)")
-            bank = audio.build_sound_bank()   # generato UNA volta sola:
-                                                # farlo a ogni riproduzione
-                                                # costerebbe ms dentro al
-                                                # ciclo di gioco
-            for sid, pcm in bank.items():
+            for sid, pcm in sound_bank.items():
                 if actual_channels == 2:
                     pcm = audio.mono_to_stereo(pcm)
                 self.sounds[sid] = pygame.mixer.Sound(buffer=pcm)
@@ -923,7 +943,7 @@ def _pixels_to_surface(pixels, w, h):
     return pygame.image.frombuffer(bytes(pixels), (w, h), 'RGB')
 
 
-def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mode='dirty-rects', fullscreen=False, use_audio=False, playtest=False, playtest_quick=False):
+def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mode='dirty-rects', fullscreen=False, use_audio=False, playtest=False, playtest_quick=False, netcode_session=None, local_player_index=0):
     """Il ciclo CPU->PPU->schermo a 60fps. show_stats=True stampa in
     console fps/tempo cpu/tempo render (disegno+blit insieme, vedi
     sotto) ogni secondo, utile per misurare le prestazioni su
@@ -986,7 +1006,7 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
     surface_renderer = SurfaceRenderer(pygame) if renderer_mode == 'surface' else None
     incremental_renderer = IncrementalRenderer(pygame) if renderer_mode == 'dirty-rects' else None
     gpu_renderer = GpuRenderer(pygame, gpu_sdl_renderer) if renderer_mode == 'gpu' else None
-    audio_player = AudioPlayer(pygame, use_audio)
+    audio_player = AudioPlayer(pygame, use_audio, sound_bank=getattr(cpu, 'sound_bank', None))
 
     # cache dello sfondo (percorso 'buffer'): ricalcolato SOLO quando
     # cambia la chiave (stage, scroll_x, scroll_y) - stage via
@@ -1027,6 +1047,16 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
     phase_stats = {}  # etichetta -> {'cpu':.., 'render':.., 'frames':..}
     playtest_t_start = time.perf_counter()
 
+    # -- multiplayer in rete (lockstep, vedi s32/netcode_lockstep.py):
+    # frame_number identifica ogni frame univocamente per host e
+    # client - deve avanzare di pari passo su tutte le istanze, o i
+    # frame che si scambiano non corrisponderebbero piu'. Avanza SOLO
+    # quando la simulazione avanza davvero (vedi sotto: se gli input
+    # non sono ancora arrivati da tutti, si salta il frame e
+    # frame_number NON avanza, altrimenti si perderebbe un numero e
+    # tutte le istanze andrebbero fuori sincronia). --
+    frame_number = 0
+
     running = True
     while running:
         for event in pygame.event.get():
@@ -1051,9 +1081,30 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
             if keys[pygame.K_ESCAPE]:
                 running = False
 
+        # -- multiplayer in rete: se una sessione lockstep e' attiva,
+        # l'input locale (da tastiera o playtest) non va alla CPU
+        # direttamente - va prima scambiato con le altre istanze, e
+        # SOLO quando tutte hanno risposto per questo frame si procede,
+        # tutte insieme con lo stesso identico vettore di input (vedi
+        # s32/netcode_lockstep.py e doc 04 del kit di rete). Se il
+        # frame non e' ancora completo (lag), si salta senza disegnare
+        # nulla di non sincronizzato - meglio un frame in ritardo che
+        # uno disallineato tra le istanze. --
+        extra_inputs = None
+        if netcode_session is not None:
+            netcode_session.submit_local_input(frame_number, input_byte)
+            frame_inputs = netcode_session.get_frame_inputs(frame_number, timeout=0.25)
+            if frame_inputs is None:
+                continue
+            input_byte = frame_inputs[local_player_index]
+            extra_inputs = tuple(
+                v for i, v in enumerate(frame_inputs) if i != local_player_index
+            )
+
         t0 = time.perf_counter()
-        n_istruzioni = cpu.run(CART_LOAD_ADDR, input_byte=input_byte)
+        n_istruzioni = cpu.run(CART_LOAD_ADDR, input_byte=input_byte, extra_inputs=extra_inputs)
         t1 = time.perf_counter()
+        frame_number += 1
 
         # audio PRIMA del rendering: il disegno puo' costare decine di
         # ms su hardware lento (vedi --stats), e far aspettare un
@@ -1380,8 +1431,8 @@ def run_benchmark(path, kind, n_frames=120, profile=False):
 def parse_flags(argv):
     """Estrae i flag di prestazioni (--stats, --benchmark, --profile,
     --surface-renderer, --buffer-renderer, --gpu-renderer, --fullscreen,
-    --no-audio, --playtest, --playtest-quick) da argv, ritornando
-    (argv_ripulito, dict_flag) -
+    --no-audio, --playtest, --playtest-quick, --netplay-host,
+    --netplay-join) da argv, ritornando (argv_ripulito, dict_flag) -
     separato da determine_mode() apposta, per restare entrambi
     testabili singolarmente.
 
@@ -1392,10 +1443,20 @@ def parse_flags(argv):
     Pi 1 vera come il piu' veloce (~10-12ms/frame contro i ~48-54ms
     del percorso a buffer, vedi README.md). --buffer-renderer torna
     al percorso precedente se mai servisse un confronto o emergesse
-    un limite non ancora visto."""
-    flags = {'stats': False, 'benchmark': False, 'profile': False, 'renderer': 'dirty-rects', 'fullscreen': False, 'audio': True, 'playtest': False, 'playtest_quick': False}
+    un limite non ancora visto.
+
+    --netplay-host <porta> <num_giocatori> e --netplay-join <ip>
+    <porta> abilitano il multiplayer in rete (lockstep, vedi
+    s32/netcode_lockstep.py) - a differenza degli altri flag,
+    consumano 2 argomenti SUCCESSIVI, non solo se stessi. Lasciati
+    fuori dal kit di rete originale apposta ("meglio scriverlo voi
+    seguendo lo stile esistente"), aggiunti qui."""
+    flags = {'stats': False, 'benchmark': False, 'profile': False, 'renderer': 'dirty-rects', 'fullscreen': False, 'audio': True, 'playtest': False, 'playtest_quick': False,
+              'netplay_host_port': None, 'netplay_host_players': None, 'netplay_join_addr': None}
     rest = []
-    for arg in argv:
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
         if arg == '--stats':
             flags['stats'] = True
         elif arg == '--benchmark':
@@ -1419,8 +1480,33 @@ def parse_flags(argv):
         elif arg == '--playtest-quick':
             flags['playtest'] = True
             flags['playtest_quick'] = True
+        elif arg == '--netplay-host':
+            if i + 2 >= len(argv):
+                raise LauncherError('--netplay-host richiede due argomenti: <porta> <num_giocatori>')
+            try:
+                porta = int(argv[i+1])
+                num_giocatori = int(argv[i+2])
+            except ValueError:
+                raise LauncherError(
+                    f'--netplay-host: porta e numero giocatori devono essere numeri interi '
+                    f'(ricevuto "{argv[i+1]}" "{argv[i+2]}")')
+            if not (2 <= num_giocatori <= 8):
+                raise LauncherError(f'--netplay-host: numero giocatori fuori range (2-8): {num_giocatori}')
+            flags['netplay_host_port'] = porta
+            flags['netplay_host_players'] = num_giocatori
+            i += 2
+        elif arg == '--netplay-join':
+            if i + 2 >= len(argv):
+                raise LauncherError('--netplay-join richiede due argomenti: <ip> <porta>')
+            try:
+                porta = int(argv[i+2])
+            except ValueError:
+                raise LauncherError(f'--netplay-join: porta deve essere un numero intero (ricevuto "{argv[i+2]}")')
+            flags['netplay_join_addr'] = (argv[i+1], porta)
+            i += 2
         else:
             rest.append(arg)
+        i += 1
     return rest, flags
 
 
@@ -1434,9 +1520,30 @@ def main():
         if flags['benchmark'] or flags['profile']:
             run_benchmark(path, kind, profile=flags['profile'])
         else:
+            netcode_session = None
+            local_player_index = 0
+            if flags['netplay_host_port'] is not None:
+                from netcode_lockstep import LockstepHost
+                porta = flags['netplay_host_port']
+                num_giocatori = flags['netplay_host_players']
+                print(f"[netplay] host in ascolto sulla porta {porta}, "
+                      f"aspetto {num_giocatori} giocatori...")
+                netcode_session = LockstepHost(num_players=num_giocatori, bind_port=porta)
+                netcode_session.wait_for_players()
+                local_player_index = 0  # l'host e' sempre il giocatore 0
+                print("[netplay] tutti i giocatori connessi, si parte")
+            elif flags['netplay_join_addr'] is not None:
+                from netcode_lockstep import LockstepClient
+                ip, porta = flags['netplay_join_addr']
+                print(f"[netplay] mi connetto a {ip}:{porta}...")
+                netcode_session = LockstepClient()
+                local_player_index = netcode_session.connect(ip, host_port=porta)
+                print(f"[netplay] connesso - sono il giocatore {local_player_index}")
+
             run_direct(path, kind, show_stats=flags['stats'], renderer_mode=flags['renderer'],
                        fullscreen=flags['fullscreen'], use_audio=flags['audio'], playtest=flags['playtest'],
-                       playtest_quick=flags['playtest_quick'])
+                       playtest_quick=flags['playtest_quick'],
+                       netcode_session=netcode_session, local_player_index=local_player_index)
 
 
 if __name__ == '__main__':
