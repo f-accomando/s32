@@ -1603,3 +1603,87 @@ all'origine del bug.
 per verificare che `input_byte`/`extra_inputs` restino identici
 indipendentemente da `local_player_index`). 414 test totali. Dettagli
 in `doc_networking.md`, sezione 2quater.
+
+## Scroll GPU-side vero (issue #10): eliminato il costo di texture_update durante lo scroll
+
+Riprende l'analisi di un report esterno (altra sessione Claude) che
+isolava con precisione perche' `--gpu-renderer` non desse il salto di
+prestazioni sperato: nelle fasi SENZA scroll la GPU vinceva alla
+grande (`present()` ~2.5ms contro i ~20ms di `flip()` del vecchio
+renderer), ma durante lo scroll - la condizione piu' comune nel gioco
+vero - `texture_update` da solo costava **~36ms/frame**, mangiando
+quasi tutto il guadagno. Causa: una texture GPU non ha un equivalente
+di `Surface.scroll()` (che sposta FISICAMENTE i pixel gia' disegnati
+lato CPU) - il fix precedente (dopo il bug "il personaggio sembrava
+stazionario e i nemici oltrepassavano il muro", trovato dall'utente
+giocando davvero) doveva quindi ricaricare l'INTERO `bg_surface`
+(480x320) sulla texture ad ogni frame di scroll per restare corretto.
+
+Era gia' stata identificata la strada giusta ma MAI tentata: fare lo
+scroll DAVVERO lato GPU con un render-to-texture (spostare il
+contenuto GIA' in VRAM invece di ricaricarlo da una Surface CPU) -
+scartata perche' richiedeva l'equivalente SDL2 di
+`SDL_SetRenderTarget` esposto da pygame, e il nome esatto della
+proprieta' non era mai stato confermato con certezza (gia' 3 bug da
+API indovinata in quest'area prima di arrivare alla versione
+funzionante precedente).
+
+**Verificato con certezza** (non piu' un'ipotesi): `pygame._sdl2.video.Renderer`
+espone `.target` (getter/setter - `None` per tornare alla finestra) e
+`Texture(renderer, size, target=True)` crea una texture utilizzabile
+come render target - confermato per introspezione diretta su
+pygame-ce 2.5.8 reale, poi validato end-to-end con
+`SDL_VIDEODRIVER=dummy`/`offscreen` (headless, nessuna GPU necessaria
+per verificare la CORRETTEZZA della sequenza di chiamate, anche se il
+guadagno di VELOCITA' resta da confermare sulla Pi 1 vera - vedi
+sotto): un test sintetico con righe di colori distinti ha confermato
+che lo shift + la striscia coprono esattamente il 100% dell'immagine,
+senza righe scoperte o duplicate, pixel per pixel identico a
+`Surface.scroll()+blit()`.
+
+**Implementazione** (`GpuRenderer.render()` in `s32/launcher.py`):
+durante uno scroll verticale incrementale, invece di ricostruire e
+ricaricare l'intero `bg_surface`, si disegna la vecchia texture
+DENTRO una seconda texture "target" (`bg_texture_scratch`), shiftata
+della stessa quantita' che prima usava `Surface.scroll(0,-dy)`, poi si
+carica dalla CPU SOLO la striscia nuova (poche righe, non l'intero
+schermo) su una terza texture riutilizzabile (`bg_strip_texture`) e la
+si disegna esattamente dove lo shift l'ha scoperta. Le due texture di
+scambio si alternano (ping-pong: quella appena disegnata diventa la
+"corrente", la vecchia corrente diventa lo scratch per il prossimo
+frame) - create UNA SOLA VOLTA al primo scroll e riusate per sempre,
+mai un'allocazione per frame (stessa filosofia gia' usata per l'atlas
+sprite). `self.bg_surface` (la Surface CPU parallela, tenuta in
+sincronia ad ogni frame di scroll solo per poi ricaricarla per
+intero) e' stata eliminata del tutto per `GpuRenderer` - non serve
+piu' a nulla, l'unica sorgente di verita' ora e' la texture GPU
+stessa.
+
+**Verificato end-to-end, non solo con mock**: un playtest completo
+reale (`--playtest`, 4671 frame, di cui 1212 in scroll incrementale)
+eseguito per davvero attraverso `launcher.main()` con pygame-ce vero
+(`SDL_VIDEODRIVER=offscreen`, software - nessuna GPU disponibile in
+questo ambiente di sviluppo, quindi solo CORRETTEZZA verificata qui,
+non velocita') non ha prodotto un solo errore, e gli screenshot del
+frame renderizzato dopo centinaia di frame di scroll sono puliti
+(nessun artefatto, nessuna riga congelata, nessun ghosting).
+
+13 nuovi test (`test_launcher.py`, blocco `GpuRenderer`): il mock di
+`Texture`/`Renderer` e' stato verificato contro pygame-ce vero prima
+di scrivere i test (stessa sequenza di chiamate confermata
+funzionante headless). Verificano: la striscia caricata e' PICCOLA
+(non piu' l'intero schermo), lo shift e la striscia vengono disegnati
+DENTRO la texture di scambio (`renderer.target` impostato e poi
+resettato a `None` prima di comporre il frame finale), le texture di
+scambio si creano una sola volta e si riusano nei frame successivi
+(nessuna allocazione ripetuta), il rebuild completo (cambio stanza)
+continua a funzionare come prima. 427 test totali.
+
+**Numero assoluto sulla Pi 1 reale ancora da confermare** (issue
+aperta, nessun accesso diretto all'hardware da questo ambiente) - la
+correttezza e' verificata con certezza, il guadagno di velocita'
+atteso (eliminare un caricamento CPU->GPU di 480x320 pixel ad ogni
+frame di scroll, sostituendolo con uno shift GPU-nativo + un
+caricamento di poche righe) e' quello per cui la GPU serve, ma la
+misura definitiva spetta a un test reale con `--gpu-renderer
+--playtest-quick --stats` sulla Pi 1 vera.
