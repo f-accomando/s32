@@ -99,7 +99,16 @@ FREE_END = ADDRESS_SPACE  # ~15,5MB deliberatamente non assegnati
 # ---------------------------------------------------------------
 BITS_PER_PIXEL = 8
 COLORS_PER_TILE = 256  # 1 trasparente (indice 0) + 255 veri
-TILE_SIZE_PX = 32  # UNIFICATO tra sfondo e sprite (era 8) - "strada B":
+TILE_SIZE_PX = 32  # FISSA per l'intera console, non selezionabile per
+                    # cartuccia (deciso con l'utente): ogni cambio qui
+                    # e' un cambio hardware globale, non di un singolo
+                    # gioco. Renderla variabile per-cart (es. 8x8/16x16
+                    # per barebone, 32x32 per adventure, nella stessa
+                    # sessione) e' un'idea tenuta da parte per il
+                    # futuro - richiederebbe portare questa costante da
+                    # globale a un parametro registrato per cartuccia,
+                    # toccando PPU/CPU/assembler. Non fatto ora.
+                    # UNIFICATO tra sfondo e sprite (era 8) - "strada B":
                     # coerenza totale invece di due scale diverse, e
                     # un bonus prestazioni concreto: lo sfondo passa
                     # da 2400 posizioni-tile a schermo a 150 (il costo
