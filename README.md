@@ -1687,3 +1687,51 @@ frame di scroll, sostituendolo con uno shift GPU-nativo + un
 caricamento di poche righe) e' quello per cui la GPU serve, ma la
 misura definitiva spetta a un test reale con `--gpu-renderer
 --playtest-quick --stats` sulla Pi 1 vera.
+
+## Confermato dall'utente sulla Pi 1 vera: -30% totale, fino a -34% durante lo scroll - e la prossima scoperta
+
+L'utente ha rilanciato `--gpu-renderer --playtest-quick --stats` sulla
+Pi 1 reale (`adventure_cl`) dopo il fix sopra:
+
+| fase | prima (ms) | ora (ms) | guadagno |
+|---|---|---|---|
+| 2-scroll giu' | 69.02 | 46.68 | **32.4%** |
+| 2-scroll su | 70.80 | 47.02 | **33.6%** |
+| 2b-scroll sostenuto | 57.94 | 41.03 | **29.2%** |
+| 4-esplorazione mista | 59.22 | 39.01 | **34.1%** |
+| TOTALE | 58.39 | 40.73 | **30.2%** |
+
+`gpu_shift` (lo shift GPU-side vero) costa solo ~3.5-4.9ms/frame,
+contro i ~36ms del vecchio `texture_update` a pieno schermo - il fix
+funziona esattamente come previsto sull'hardware reale, non solo in
+teoria.
+
+**Scoperta immediata dagli stessi dati**: ora che `gpu_shift` e'
+economico, il dettaglio scroll rivela un NUOVO collo di bottiglia -
+`draw_sprites` costa da solo **~12-14ms/frame**, quasi tutto il
+budget di rendering rimasto (target dell'utente: 15ms). Contato
+direttamente (`iter_visible_sprite_tiles`) quanti sotto-tile vengono
+disegnati durante lo scroll in questo scenario: solo **3-7 per
+frame** - un numero basso, che sposta il sospetto da "troppi tile"
+a "costo fisso per chiamata `Texture.draw()` sorprendentemente alto"
+(~2-3ms a chiamata, se distribuito linearmente).
+
+Anche la CPU e' emersa come co-collo di bottiglia nello stesso giro
+di dati: ~21-29ms/frame durante lo scroll, spesso PIU' del render
+stesso (~17-20ms) - la CPU non era mai stata il bersaglio di
+quest'ultimo giro di ottimizzazioni, ma con il render sceso resta ora
+il pezzo piu' grande in diverse fasi (issue #21 PyPy, #22
+Cython/Nuitka).
+
+**`s32/bench_gpu_draw.py`** (nuovo): script diagnostico standalone
+per isolare il costo di `Texture.draw()` dal resto del motore (CPU,
+scroll, audio - tutti mischiati in un playtest vero, impossibile
+isolare la vera causa da li'). Misura l'overhead fisso di
+`clear()+present()`, il costo marginale di 1/4/7/16 `draw()` extra, e
+confronta direttamente 4 tile 32x32 separati (come fa oggi l'atlas)
+contro 1 tile 64x64 precomposto equivalente - per rispondere con dati
+reali, non ipotesi, se precomporre le entita' multi-tile in una
+texture sola aiuterebbe. Da lanciare con `python3
+s32/bench_gpu_draw.py` sulla Pi 1 vera (qui in sviluppo i numeri non
+sono comparabili, nessuna GPU reale disponibile). Dettagli completi
+nell'issue #24 su GitHub.
