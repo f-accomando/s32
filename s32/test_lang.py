@@ -264,7 +264,7 @@ c13.run(0x1000)
 check("operatore XOR: 3^1", c13.read16(0x001000), 2)
 
 # ---------------------------------------------------------------
-# input(N): multiplayer locale - un giocatore per porta
+# Test 14: input(N): multiplayer locale - un giocatore per porta
 # ---------------------------------------------------------------
 from cpu import PORT_INPUT, EXTRA_INPUT_PORTS
 

@@ -1414,3 +1414,64 @@ scroll=playerY-160`), sia in assembly che in ConsoleLang.
   coperti da `var`/`write_oam` (es. scrivere in VRAM a mano)
 - letterali esadecimali (`0x...`) supportati ovunque un numero e'
   atteso in ConsoleLang, non solo decimali
+
+## Mini-OS separato in os_menu.py, griglia di icone, multiplayer dal menu
+
+Richiesta dell'utente: "sistemare l'OS" - tre cose distinte, fatte
+tutte e tre insieme.
+
+**1. Separazione vera da launcher.py.** `carts_registry.py` e
+`menu_state.py` promettevano gia' nei loro stessi docstring un file
+`os_menu.py` dedicato al disegno pygame ("separata da os_menu.py
+apposta") - ma quel file non esisteva mai, il disegno (`run_os_menu`)
+viveva dentro `launcher.py`. Estratto in `s32/os_menu.py` per davvero.
+`launcher.py` resta solo l'ESECUZIONE (`run_direct`/
+`_run_pygame_loop`) + due helper nuovi, `start_netcode_host()` e
+`start_netcode_client()` (la stessa logica che gia' costruiva
+LockstepHost/LockstepClient per i flag CLI, estratta cosi' il menu
+puo' riusarla senza duplicarla).
+
+**2. Griglia di icone invece della lista di titoli.** `menu_state.py`:
+`MenuState` accetta ora `columns` (default 1, quindi ogni uso storico
+a lista verticale resta invariato) - `move_up`/`move_down` avanzano di
+`columns` posizioni, nuovi `move_left`/`move_right` di 1. `os_menu.py`
+disegna una griglia (`GRID_COLUMNS=4`) invece di un elenco. Icona per
+cartuccia: `carts_registry.py` cerca un `icon.png` opzionale
+(`ICON_WIDTH_PX x ICON_HEIGHT_PX` = 32x40, convenzione indipendente da
+`TILE_SIZE_PX` - questa e' un'icona di MENU, mai caricata in VRAM,
+disegnata direttamente da pygame) - assente, `os_menu.py` disegna un
+riquadro grigio col titolo sotto, mai un crash.
+
+**3. Locale/Ospita/Unisciti dal menu, non solo da riga di comando.**
+Dopo aver scelto una cartuccia, un secondo schermo chiede la modalita'
+- "Locale" lancia subito come prima; "Ospita partita"/"Unisciti a
+partita" mostrano un piccolo form (porta/numero giocatori, o ip/porta)
+con un `TextField` minimale (nuova classe in `os_menu.py`, pura logica
+senza pygame - accetta solo caratteri di un set consentito, es. sole
+cifre per la porta), poi chiamano gli stessi `start_netcode_host`/
+`start_netcode_client` del punto 1.
+
+**Il menu OS ora e' un piccolo automa a stati** (`grid` -> `mode` ->
+`host`/`join` -> lancio -> torna a `grid`) invece di uscire subito
+dopo una partita. Punto delicato: **ESC dentro la partita torna al
+menu, chiudere la FINESTRA chiude tutto** - servivano distinguibili,
+prima non lo erano (`_run_pygame_loop` trattava `pygame.QUIT` ed ESC
+allo stesso modo). `_run_pygame_loop`/`run_direct` ora ritornano
+`True` solo se e' arrivato un vero `pygame.QUIT`, `False` altrimenti
+(ESC, fine sequenza `--playtest`) - `os_menu.py` lo usa per decidere
+se tornare alla griglia o chiudere il programma. La `MenuState` della
+griglia viene creata **una volta sola** fuori dal ciclo di gioco, mai
+ricreata tornando dal menu - e' cosi' che l'indice selezionato
+sopravvive a una partita giocata ("riprendi da dove eri rimasto",
+richiesto esplicitamente).
+
+Testato con lo stesso mock di pygame gia' usato per il test del
+netcode in `test_launcher.py` (`sys.modules['pygame']` finto,
+`run_direct`/`start_netcode_host` sostituiti con finti che registrano
+le chiamate): selezione cartuccia, ESC-in-game vs chiusura-finestra,
+persistenza dell'indice tra una partita e l'altra, form "Ospita" con i
+valori di default, chiusura della sessione di rete a fine partita.
+Nessuna verifica visiva vera (nessun display disponibile in
+quest'ambiente) - solo il FLUSSO, non il disegno, esattamente come gia'
+sceglie di fare il resto del progetto per il codice che dipende da
+pygame.

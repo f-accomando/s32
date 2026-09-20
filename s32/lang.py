@@ -24,6 +24,13 @@ BG_PALETTE erano specifiche del meccanismo di cambio stanza di v1 -
 S32 non ha ancora un equivalente, la VRAM piu' grande apre altre
 strade non ancora decise). Verranno aggiunte quando quel meccanismo
 sara' progettato per S32, non prima.
+
+input(N) - AGGIUNTO per il multiplayer locale (vedi
+s32/netcode_lockstep.py e carts/barebone_p2p/): N e' l'indice del
+giocatore (0 = locale/tastiera, invariato; 1-7 = gli altri, letti da
+EXTRA_INPUT_PORTS in cpu.py). input() senza argomento resta
+equivalente a input(0), quindi ogni cartuccia esistente continua a
+funzionare invariata.
 """
 
 import re

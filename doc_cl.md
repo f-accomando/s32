@@ -137,6 +137,32 @@ di questa CPU supporta l'indirizzamento indicizzato.
 
 ---
 
+## 7bis. input(N) — multiplayer: leggere gli altri giocatori
+
+`input()` senza argomenti legge sempre il giocatore locale (indice 0)
+— invariato. Per il multiplayer in rete (vedi `doc_networking.md` e
+`carts/barebone_p2p/`), `input(N)` legge l'input del giocatore di
+indice N (0-7):
+
+```
+var mio = input()        // equivalente a input(0)
+var p2  = input(1)       // giocatore 2
+if (input(2) & 1) { ... } // giocatore 3, direttamente in una condizione
+```
+
+N deve stare tra 0 e 7 (fino a 8 giocatori) — un indice fuori range è
+un `SyntaxError` a tempo di compilazione, non un comportamento
+indefinito a runtime. Sotto il cofano, `input(N)` per N>0 legge da una
+delle porte `EXTRA_INPUT_PORTS` (`cpu.py`) — celle di memoria che il
+launcher scrive prima di ogni frame con l'input ricevuto in rete
+dagli altri giocatori (vedi `s32/netcode_lockstep.py` e
+`doc_networking.md` per come ci arriva).
+
+Vedi `carts/barebone_p2p/game.py` per l'esempio completo con 4
+giocatori.
+
+---
+
 ## 8. Tutto insieme: la title screen vera
 
 Ecco `carts/adventure_cl/game.py` — stesso identico comportamento di

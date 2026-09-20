@@ -36,6 +36,7 @@ CALL_STACK_MAX_DEPTH = 256  # limite di sicurezza (JSR annidate), non
                              # di ricorsione di finire la memoria
 
 PORT_INPUT = 0x042000         # stessa porta INPUT della v1, nuovo indirizzo
+                               # (giocatore 1 - locale, tastiera)
 PORT_STAGE_SELECT = 0x042001  # scrivere un numero di stage qui copia
                                # ISTANTANEAMENTE (nessun ciclo CPU in
                                # piu', come il DMA del vero SNES - vedi

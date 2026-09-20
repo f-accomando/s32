@@ -14,6 +14,20 @@ CONVENZIONE per una cartuccia valida (una sottocartella di carts/):
                       nome della cartella (con underscore -> spazi,
                       prima lettera maiuscola)
 
+CARTUCCIA SINGLE-FILE (nuova convenzione, vedi carts/barebone/): se
+non c'e' cart_info.py, TITLE puo' essere definito direttamente dentro
+game.py - stesso discorso per build_vram/build_cgram/build_oam/
+build_stages al posto di cart.py (vedi launcher._load_cart_graphics).
+Una cartuccia del genere e' fatta di UN SOLO file Python (piu' gli
+eventuali spritesheet .png) - niente cart.py/cart_info.py separati.
+
+ICONA (opzionale): un file ICON_FILENAME ("icon.png") nella cartella
+della cartuccia, ICON_WIDTH_PX x ICON_HEIGHT_PX (32x40) - mostrata
+nella griglia del menu OS al posto del riquadro grigio di default (vedi
+os_menu.py). Convenzione a parte da TILE_SIZE_PX (memory_map.py, 32x32
+per la grafica DI GIOCO): questa e' un'icona per il menu OS, mai
+caricata in VRAM, disegnata direttamente da os_menu.py con pygame.
+
 Questo modulo NON usa pygame e NON esegue nulla - solo scoperta e
 metadati, per restare interamente testabile senza un display.
 """
@@ -21,14 +35,19 @@ metadati, per restare interamente testabile senza un display.
 import os
 import importlib.util
 
+ICON_FILENAME = 'icon.png'
+ICON_WIDTH_PX = 32
+ICON_HEIGHT_PX = 40
+
 
 class Cart:
-    def __init__(self, name, path, title, has_py, has_asm):
+    def __init__(self, name, path, title, has_py, has_asm, has_icon=False):
         self.name = name          # nome della cartella (identificatore stabile)
         self.path = path          # percorso assoluto della cartella
         self.title = title        # titolo da mostrare nel menu
         self.has_py = has_py
         self.has_asm = has_asm
+        self.has_icon = has_icon
 
     def entry_py(self):
         return os.path.join(self.path, 'game.py') if self.has_py else None
@@ -36,21 +55,28 @@ class Cart:
     def entry_asm(self):
         return os.path.join(self.path, 'game.asm') if self.has_asm else None
 
+    def icon_path(self):
+        """Percorso assoluto di icon.png, o None se la cartuccia non
+        ne ha una - os_menu.py disegna un riquadro grigio col nome in
+        quel caso, mai un crash o un placeholder mancante."""
+        return os.path.join(self.path, ICON_FILENAME) if self.has_icon else None
+
     def __repr__(self):
         kinds = []
         if self.has_py: kinds.append('py')
         if self.has_asm: kinds.append('asm')
-        return f'Cart({self.name!r}, title={self.title!r}, kinds={kinds})'
+        return f'Cart({self.name!r}, title={self.title!r}, kinds={kinds}, has_icon={self.has_icon})'
 
 
 def _default_title(folder_name):
     return folder_name.replace('_', ' ').replace('-', ' ').strip().title()
 
 
-def _read_title_from_cart_info(cart_info_path):
-    """Legge la variabile TITLE da cart_info.py SENZA eseguire il
-    resto del modulo come side-effect involontario - import mirato."""
-    spec = importlib.util.spec_from_file_location('cart_info_tmp', cart_info_path)
+def _read_title_from_module(module_path):
+    """Legge la variabile TITLE da un modulo Python (cart_info.py, o
+    game.py per una cartuccia single-file) - import mirato, non tocca
+    sys.modules."""
+    spec = importlib.util.spec_from_file_location('cart_title_tmp', module_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return getattr(module, 'TITLE', None)
@@ -74,15 +100,23 @@ def discover_carts(carts_dir):
         has_asm = os.path.isfile(os.path.join(full_path, 'game.asm'))
         if not has_py and not has_asm:
             continue
+        has_icon = os.path.isfile(os.path.join(full_path, ICON_FILENAME))
 
         title = _default_title(entry)
         cart_info_path = os.path.join(full_path, 'cart_info.py')
+        game_py_path = os.path.join(full_path, 'game.py')
         if os.path.isfile(cart_info_path):
-            custom_title = _read_title_from_cart_info(cart_info_path)
+            custom_title = _read_title_from_module(cart_info_path)
+            if custom_title:
+                title = custom_title
+        elif has_py:
+            # cartuccia single-file (niente cart_info.py separato):
+            # TITLE, se definito, vive direttamente in game.py
+            custom_title = _read_title_from_module(game_py_path)
             if custom_title:
                 title = custom_title
 
-        result.append(Cart(entry, full_path, title, has_py, has_asm))
+        result.append(Cart(entry, full_path, title, has_py, has_asm, has_icon))
 
     result.sort(key=lambda c: c.title.lower())
     return result
