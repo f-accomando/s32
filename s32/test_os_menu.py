@@ -361,6 +361,83 @@ finally:
     _launcher_om.run_direct = _orig_run_direct_om
     _launcher_om.start_netcode_host = _orig_start_host_om
 
+# scenario 4: "Unisciti a partita in rete" - la scansione LAN trova UN
+# host -> schermata 'join_pick', selezionandolo si collega DIRETTAMENTE
+# (niente IP da digitare a mano). Risponde alla domanda dell'utente
+# "come faccio a sapere l'IP dell'host?" - risposta: nella maggior
+# parte dei casi non serve, il menu lo trova da solo.
+_discover_queue = []
+
+def _fake_discover_netcode_hosts(duration_s=2.0):
+    return _discover_queue.pop(0)
+
+_client_calls = []
+_fake_session_client_om = _FakeNetSession()
+
+def _fake_start_netcode_client(ip, port):
+    _client_calls.append((ip, port))
+    return _fake_session_client_om, 1
+
+_pygame_om.quit.reset_mock()
+_run_direct_calls.clear()
+_launcher_om.run_direct = _fake_run_direct
+_orig_discover_om = _launcher_om.discover_netcode_hosts
+_orig_start_client_om = _launcher_om.start_netcode_client
+_launcher_om.discover_netcode_hosts = _fake_discover_netcode_hosts
+_launcher_om.start_netcode_client = _fake_start_netcode_client
+try:
+    _discover_queue.append([{'ip': '192.168.1.50', 'name': 'S32', 'port': 42420}])
+    _eventi_in_coda.extend([
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RETURN)],               # grid: scegli "aaa" -> 'mode'
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_DOWN)],
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_DOWN)],                  # mode: -> "Unisciti a partita in rete"
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RETURN)],               # mode: conferma -> scansione -> 'join_pick'
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RETURN)],               # join_pick: sceglie l'unico host trovato
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_ESCAPE)],               # torna al menu poi esci
+    ])
+    _run_direct_returns.append(False)
+
+    _os_menu_om.run_os_menu()
+
+    check("run_os_menu 'Unisciti' (host trovato): NON chiede l'IP a mano, si collega subito",
+          _client_calls, [('192.168.1.50', 42420)])
+    check("run_os_menu 'Unisciti' (host trovato): run_direct riceve la sessione creata",
+          _run_direct_calls[0][2] is _fake_session_client_om, True)
+finally:
+    _launcher_om.run_direct = _orig_run_direct_om
+    _launcher_om.discover_netcode_hosts = _orig_discover_om
+    _launcher_om.start_netcode_client = _orig_start_client_om
+
+# scenario 5: la scansione LAN non trova NESSUN host -> si ripiega
+# SUBITO sul form manuale (nessun vicolo cieco)
+_client_calls.clear()
+_pygame_om.quit.reset_mock()
+_run_direct_calls.clear()
+_launcher_om.run_direct = _fake_run_direct
+_launcher_om.discover_netcode_hosts = _fake_discover_netcode_hosts
+_launcher_om.start_netcode_client = _fake_start_netcode_client
+try:
+    _discover_queue.append([])  # nessun host trovato
+    _eventi_in_coda.extend([
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RETURN)],               # grid: scegli "aaa" -> 'mode'
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_DOWN)],
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_DOWN)],                  # mode: -> "Unisciti a partita in rete"
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RETURN)],               # mode: conferma -> scansione vuota -> form manuale 'join'
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=999, unicode='9')],                  # digita un carattere nel campo IP
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RETURN)],               # join: conferma (porta di default 42420)
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_ESCAPE)],               # torna al menu poi esci
+    ])
+    _run_direct_returns.append(False)
+
+    _os_menu_om.run_os_menu()
+
+    check("run_os_menu 'Unisciti' (nessun host trovato): ripiega sul form manuale con l'IP digitato",
+          _client_calls, [('9', 42420)])
+finally:
+    _launcher_om.run_direct = _orig_run_direct_om
+    _launcher_om.discover_netcode_hosts = _orig_discover_om
+    _launcher_om.start_netcode_client = _orig_start_client_om
+
 print()
 if fails == 0:
     print("Tutti i test passati.")
