@@ -29,6 +29,7 @@ from memory_map import (
     FLAG_ZERO, FLAG_NEGATIVE, FLAG_CARRY, FLAG_OVERFLOW,
     TILEMAP_VRAM_OFFSET, TILEMAP_BYTES, VRAM_BASE,
 )
+import zlib
 
 CALL_STACK_MAX_DEPTH = 256  # limite di sicurezza (JSR annidate), non
                              # un vincolo hardware - evita loop infiniti
@@ -61,6 +62,21 @@ PORT_SOUND = 0x042004         # scrivere un ID suono qui lo ACCODA in
                                # che il programma aggiorna ogni frame
                                # (es. la Y del giocatore, per la camera
                                # che segue verticalmente)
+
+# Porte input aggiuntive per multiplayer locale (lockstep, vedi
+# s32/netcode_lockstep.py). PORT_INPUT (0x042000) resta il giocatore
+# 1/indice 0, invariato per compatibilita' con le ROM esistenti che
+# chiamano input() senza argomenti.
+EXTRA_INPUT_PORTS = (
+    0x042010,  # giocatore 2 (indice 1)
+    0x042011,  # giocatore 3 (indice 2)
+    0x042012,  # giocatore 4 (indice 3)
+    0x042013,  # giocatore 5 (indice 4)
+    0x042014,  # giocatore 6 (indice 5)
+    0x042015,  # giocatore 7 (indice 6)
+    0x042016,  # giocatore 8 (indice 7)
+)
+ALL_INPUT_PORTS = (PORT_INPUT,) + EXTRA_INPUT_PORTS
 
 
 class CPU:
@@ -125,8 +141,8 @@ class CPU:
     def read_mem(self, addr):
         """Punto di estensione per le porte (vedi ports.py, non
         ancora scritto) - per ora legge sempre direttamente."""
-        if addr == PORT_INPUT:
-            return self.mem[PORT_INPUT]
+        if addr in ALL_INPUT_PORTS:
+            return self.mem[addr]
         return self.read16(addr)
 
     def write_mem(self, addr, value):
@@ -449,9 +465,12 @@ class CPU:
             raise RuntimeError(f"Opcode sconosciuto: 0x{op:02X} a pc=0x{self.pc:06X}")
         return handler()
 
-    def run(self, start_pc, input_byte=0, max_steps=200000):
+    def run(self, start_pc, input_byte=0, extra_inputs=None, max_steps=200000):
         self.pc = start_pc
-        self.mem[PORT_INPUT] = input_byte
+        self.mem[PORT_INPUT] = input_byte & 0xff
+        if extra_inputs:
+            for port, value in zip(EXTRA_INPUT_PORTS, extra_inputs):
+                self.mem[port] = value & 0xff
         steps = 0
         while steps < max_steps:
             steps += 1
@@ -460,3 +479,13 @@ class CPU:
         else:
             raise RuntimeError(f"Superato il limite di sicurezza di {max_steps} passi (loop infinito?)")
         return steps
+
+    def state_checksum(self):
+        """Checksum leggero della WRAM (dove vive tutto lo stato
+        persistente del gioco) - da chiamare ogni tot frame e
+        confrontare tra le istanze in rete (vedi
+        s32/netcode_lockstep.py). Se non combacia, le simulazioni
+        sono andate fuori sincronia - un bug non deterministico o un
+        input perso, utile scoprirlo subito invece che vederlo come
+        un bug di gioco "misterioso" molto piu' tardi."""
+        return zlib.crc32(bytes(self.mem[WRAM_BASE:WRAM_END]))

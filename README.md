@@ -478,6 +478,150 @@ Confronto diretto, stesso identico scenario (--playtest-quick
 Un miglioramento reale e confermato sull'hardware vero, indipendente
 dal bug di correttezza sopra (che riguarda solo `render`, non `cpu`).
 
+## Kit di rete integrato (lockstep multiplayer), da networking_kit.zip caricato dall'utente
+
+L'utente ha caricato un kit di rete auto-contenuto (3 documenti di
+patch, 2 documenti di architettura, `netcode_lockstep.py`,
+`netcode_mmo.py`) con un README che dichiarava tutto "testato". Non
+mi sono fidato della dicitura - ho verificato io stesso ogni pezzo
+prima di integrare, con lo stesso rigore usato per tutto il resto
+del motore: eseguito davvero `netcode_lockstep.py` (host+client
+locali, 5 frame di input diversi, verificato che ricevano lo stesso
+identico vettore) e `netcode_mmo.py` (connessione, movimento,
+interest management a griglia - un giocatore lontano non vede
+quello vicino), non solo letto il codice.
+
+### Cosa e' stato applicato
+
+**cpu.py** (doc 01): `EXTRA_INPUT_PORTS` (7 porte, 0x042010-0x042016,
+giocatori 2-8) + `ALL_INPUT_PORTS`. `read_mem()` riconosce tutte le
+porte input, non solo `PORT_INPUT`. `run()` accetta `extra_inputs`
+opzionale (default `None`, retrocompatibile con ogni chiamata
+esistente) - scrive `input_byte` su `PORT_INPUT` e ogni valore di
+`extra_inputs` sulla porta del giocatore corrispondente. Nuovo
+`state_checksum()` (CRC32 della WRAM) per rilevare disallineamenti
+tra istanze in rete. 23 nuovi test.
+
+**lang.py** (doc 02): `input(N)` in ConsoleLang, N opzionale 0-7
+(default 0, quindi `input()` resta identico a prima - NOTA: ora
+compila in `LDA <porta>` invece del vecchio opcode dedicato `IN`,
+comportamentalmente equivalente ma bytecode diverso; nessun test
+esistente controllava il bytecode esatto, solo il comportamento, e
+tutti sono passati invariati). Range validato con `SyntaxError`
+chiaro se fuori 0-7. 7 nuovi test.
+
+**launcher.py** (doc 03): `_run_pygame_loop()`/`run_direct()`
+accettano `netcode_session`/`local_player_index` opzionali (default
+`None`/`0`). Quando una sessione e' attiva: l'input locale viene
+inviato (`submit_local_input`), poi si aspetta il vettore completo
+(`get_frame_inputs`) - se non ancora arrivato (lag), il frame viene
+SALTATO senza disegnare nulla di non sincronizzato, `frame_number`
+non avanza finche' non arriva una risposta valida. `run_benchmark()`
+resta invariato, sempre single-player. 3 nuovi test (con una sessione
+finta che simula lag di rete, verificando che il frame venga
+ririchiesto senza avanzare, poi ripreso normalmente).
+
+### Cosa e' stato aggiunto oltre al kit
+
+Il kit lasciava DELIBERATAMENTE fuori i flag CLI ("meglio scriverlo
+voi seguendo lo stile esistente"). Aggiunti:
+
+```
+--netplay-host <porta> <num_giocatori>
+--netplay-join <ip> <porta>
+```
+
+A differenza di tutti gli altri flag (booleani semplici),
+consumano 2 argomenti successivi - `parse_flags()` e' passato da un
+ciclo `for` a un ciclo a indice per poterli leggere. Validazione con
+`LauncherError` (coerente col resto del file): argomenti mancanti,
+non numerici, numero giocatori fuori range 2-8. `main()` costruisce
+davvero `LockstepHost`/`LockstepClient` in base al flag e li passa a
+`run_direct()` - l'host e' sempre il giocatore 0, il client riceve
+il proprio indice dall'handshake di `connect()`.
+
+`netcode_lockstep.py` e `netcode_mmo.py` copiati in `s32/`.
+`netcode_mmo.py` e' disponibile ma NON agganciato al game loop -
+nessuno dei documenti del kit ne descriveva l'integrazione (e'
+un'architettura diversa, client-server asincrona, non lockstep) -
+lasciato per un'eventuale integrazione futura con un design dedicato.
+
+### Tre errori trovati durante la verifica pratica (miei, non del kit)
+
+Scrivendo un piccolo cart di prova con `input(0)`/`input(1)` (due
+giocatori, stato persistente, mosse da porte diverse su piu' frame,
+incluso input simultaneo in direzioni opposte) ho trovato e corretto
+tre miei errori, non del kit:
+1. Chiamavo `run()` senza passare `input_byte`/`extra_inputs` dopo
+   aver scritto le porte a mano - `run()` le sovrascrive comunque
+   con i propri parametri (default 0).
+2. Il programma di prova viveva allo stesso indirizzo (0x1000) usato
+   anche come destinazione dei `poke()` di output - il programma
+   sovrascriveva se stesso dal secondo frame in poi.
+3. Dimenticata l'inizializzazione dei valori iniziali di `state`
+   (`compile_source()` li ritorna separatamente in `state_vars`, va
+   l'host a scriverli in memoria prima del primo `run()` - lo fa
+   sempre `load_cart_rom`, ma non lo facevo nel test isolato).
+
+Tutti e tre isolati e risolti prima di proseguire con l'integrazione
+vera - il codice del kit non ha mai avuto bisogno di modifiche.
+
+**330 test**, tutti passati. Playthrough completo (nemici -> grata
+-> boss sconfitto) verificato invariato in entrambe le versioni
+(assembly e ConsoleLang) dopo l'integrazione.
+
+### Non ancora fatto
+
+- Non verificato su due macchine reali diverse (solo host+client
+  locali sulla stessa macchina, via loopback)
+- `netcode_mmo.py` presente ma non agganciato a nulla
+- Nessuna UI/HUD per mostrare lo stato della connessione durante il
+  gioco (solo messaggi in console all'avvio)
+
+## Separazione audio console/cartuccia, richiesta dall'utente
+
+Segnalazione dell'utente: i suoni di Adventure erano finiti per
+errore in `s32/audio.py` (il motore/console) invece che nella
+cartuccia - esattamente come se avessimo messo lo spritesheet di
+Adventure dentro `ppu.py` invece che in `carts/_shared/graphics.py`.
+
+Corretto seguendo lo STESSO schema gia' in uso per la grafica:
+
+- **`s32/audio.py`** (console, "hardware"): resta SOLO i generatori
+  di forma d'onda generici - `square_wave`, `sweep_wave`, `noise`,
+  `silence`, `mono_to_stereo`, `SAMPLE_RATE`, `AMPLITUDE`. Riusabili
+  da QUALUNQUE cartuccia futura.
+- **`carts/_shared/sound_bank.py`** (cartuccia, nuovo file):
+  contiene gli ID suono di Adventure (`SND_ATTACK`, `SND_HURT`,
+  ecc.) e `build_sound_bank()` - quali suoni esistono e cosa
+  significano, costruiti usando i generatori della console.
+  Condiviso tra adventure_asm e adventure_cl (stesso gioco, stessi
+  suoni), stesso schema di `graphics.py`.
+- **`cart.py`** di entrambe le cartucce: importa ed espone
+  `build_sound_bank` esattamente come gia' faceva con
+  `build_stages`.
+- **`_load_cart_graphics()`** nel launcher: ora cerca anche
+  `build_sound_bank` nel `cart.py` della cartuccia (stesso
+  meccanismo `hasattr()` gia' usato per vram/cgram/oam/stages),
+  popolando `cpu.sound_bank` - vuoto di default se la cartuccia non
+  lo espone (nessun crash, il gioco resta muto).
+- **`AudioPlayer`**: non costruisce piu' il banco suoni da solo
+  chiamando `audio.build_sound_bank()` - lo riceve come parametro
+  (`sound_bank=cpu.sound_bank`), passato dal launcher dopo aver
+  caricato la cartuccia.
+
+Verificato con 7 nuovi test: `audio.py` non ha piu' gli ID/la
+funzione di Adventure, `sound_bank.py` li contiene tutti,
+`AudioPlayer` carica esattamente il banco che riceve (incluso il
+caso `sound_bank=None`/cartuccia senza audio - nessun crash),
+`_load_cart_graphics` popola `cpu.sound_bank` correttamente dal vero
+`cart.py` di Adventure. Verificato anche end-to-end con un mock
+completo di pygame: `run_direct` con `--audio` carica davvero tutti
+e 9 i suoni nel mixer, catena intera cartuccia -> sound_bank ->
+AudioPlayer -> mixer.
+
+**280 test**, tutti passati.
+
 ## Atlas sprite condiviso: da N texture separate a una sola, richiesto dall'utente
 
 Prima di implementare, calcolo onesto fatto insieme all'utente: anche

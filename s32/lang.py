@@ -229,8 +229,15 @@ class Parser:
             return ('num', int(val, 0))
         if val == 'input':
             self.expect('(')
+            idx = 0
+            if self.peek()[0] == 'NUMBER':
+                _, num_val = self.next()
+                idx = int(num_val, 0)
             self.expect(')')
-            return ('input',)
+            if not (0 <= idx <= 7):
+                raise SyntaxError(
+                    f'input({idx}): indice giocatore fuori range (0-7)')
+            return ('input', idx)
         if val == 'regx':
             return ('regx',)
         if val == 'regy':
@@ -279,7 +286,8 @@ def describe_expr(expr):
     if tag == 'num':
         return str(expr[1])
     if tag == 'input':
-        return 'input()'
+        idx = expr[1]
+        return 'input()' if idx == 0 else f'input({idx})'
     if tag == 'regx':
         return 'regx'
     if tag == 'regy':
@@ -408,7 +416,10 @@ class CodeGen:
         if tag == 'num':
             self.emit(f'LDA #{expr[1]}')
         elif tag == 'input':
-            self.emit('IN')
+            idx = expr[1]
+            from cpu import PORT_INPUT, EXTRA_INPUT_PORTS
+            port = PORT_INPUT if idx == 0 else EXTRA_INPUT_PORTS[idx - 1]
+            self.emit(f'LDA {port}')
         elif tag == 'regx':
             self.emit('TXA')  # A = X
         elif tag == 'regy':

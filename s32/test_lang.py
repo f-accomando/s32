@@ -263,6 +263,88 @@ for i, b in enumerate(rom13): c13.mem[0x1000+i] = b
 c13.run(0x1000)
 check("operatore XOR: 3^1", c13.read16(0x001000), 2)
 
+# ---------------------------------------------------------------
+# input(N): multiplayer locale - un giocatore per porta
+# ---------------------------------------------------------------
+from cpu import PORT_INPUT, EXTRA_INPUT_PORTS
+
+# input() senza argomenti deve restare identico a prima: legge
+# SOLO la porta del giocatore 0 (PORT_INPUT), come sempre
+r14 = compile_source("""
+var x = input()
+poke(0x001000, x)
+""", var_base=0x2000)
+rom14 = assemble(r14['asm'], base_addr=0x1000)
+c14 = CPU()
+for i, b in enumerate(rom14): c14.mem[0x1000+i] = b
+c14.run(0x1000, input_byte=0x11, extra_inputs=(0x99,))  # rumore sul giocatore 2: non deve influenzare
+check("input() senza argomenti: legge SOLO PORT_INPUT (giocatore 0), invariato",
+      c14.read16(0x001000), 0x11)
+
+# input(0) deve essere ESATTAMENTE equivalente a input() - stessa porta
+r15 = compile_source("""
+var x = input(0)
+poke(0x001000, x)
+""", var_base=0x2000)
+rom15 = assemble(r15['asm'], base_addr=0x1000)
+c15 = CPU()
+for i, b in enumerate(rom15): c15.mem[0x1000+i] = b
+c15.run(0x1000, input_byte=0x22)
+check("input(0): equivalente a input() - stessa porta, stesso risultato",
+      c15.read16(0x001000), 0x22)
+
+# le due porte devono rispondere in modo DAVVERO indipendente - il
+# cuore della richiesta (multiplayer locale, un giocatore per porta)
+r16 = compile_source("""
+var p1 = input(0)
+var p2 = input(1)
+poke(0x001000, p1)
+poke(0x001002, p2)
+""", var_base=0x2000)
+rom16 = assemble(r16['asm'], base_addr=0x1000)
+c16 = CPU()
+for i, b in enumerate(rom16): c16.mem[0x1000+i] = b
+c16.run(0x1000, input_byte=0x05, extra_inputs=(0x0A,))  # giocatore1=su+giu, giocatore2=sx+dx (diverso)
+check("input(0)/input(1): porte indipendenti - giocatore 1 legge il proprio valore",
+      c16.read16(0x001000), 0x05)
+check("input(0)/input(1): porte indipendenti - giocatore 2 legge il PROPRIO valore, non quello del giocatore 1",
+      c16.read16(0x001002), 0x0A)
+
+# tutti e 8 i giocatori, un giro completo - 8 poke individuali (non
+# una somma: ConsoleLang supporta un solo operatore per espressione,
+# "a + b", non catene lunghe "a+b+c+...", limite preesistente del
+# linguaggio - non e' quello che questa patch doveva cambiare)
+r17 = compile_source("""
+poke(0x001000, input(0))
+poke(0x001002, input(1))
+poke(0x001004, input(2))
+poke(0x001006, input(3))
+poke(0x001008, input(4))
+poke(0x00100A, input(5))
+poke(0x00100C, input(6))
+poke(0x00100E, input(7))
+""", var_base=0x2000)
+rom17 = assemble(r17['asm'], base_addr=0x1000)
+c17 = CPU()
+for i, b in enumerate(rom17): c17.mem[0x1000+i] = b
+c17.run(0x1000, input_byte=1, extra_inputs=(2, 3, 4, 5, 6, 7, 8))
+valori_letti = [c17.read16(0x001000 + i*2) for i in range(8)]
+check("input(0)..input(7): tutti e 8 i giocatori, ciascuno legge il proprio valore",
+      valori_letti, [1, 2, 3, 4, 5, 6, 7, 8])
+
+# range non valido: deve fallire in modo chiaro, non silenziosamente
+try:
+    compile_source("var x = input(8)\n", var_base=0x2000)
+    check("input(8): fuori range - doveva sollevare SyntaxError", False, True)
+except SyntaxError:
+    check("input(8): fuori range - solleva SyntaxError come atteso", True, True)
+
+try:
+    compile_source("var x = input(-1)\n", var_base=0x2000)
+    check("input(-1): fuori range - doveva sollevare SyntaxError", False, True)
+except SyntaxError:
+    check("input(-1): fuori range - solleva SyntaxError come atteso", True, True)
+
 print()
 if fails == 0:
     print("Tutti i test passati.")

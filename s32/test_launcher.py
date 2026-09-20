@@ -153,7 +153,7 @@ import io
 import contextlib
 
 rest1, flags1 = parse_flags(['launcher.py', 'gioco.py'])
-check("nessun flag: dict tutto False (renderer='dirty-rects', ora default)", flags1, {'stats': False, 'benchmark': False, 'profile': False, 'renderer': 'dirty-rects', 'fullscreen': False, 'audio': True, 'playtest': False, 'playtest_quick': False})
+check("nessun flag: dict tutto False (renderer='dirty-rects', ora default)", flags1, {'stats': False, 'benchmark': False, 'profile': False, 'renderer': 'dirty-rects', 'fullscreen': False, 'audio': True, 'playtest': False, 'playtest_quick': False, 'netplay_host_port': None, 'netplay_host_players': None, 'netplay_join_addr': None})
 check("nessun flag: argv invariato", rest1, ['launcher.py', 'gioco.py'])
 
 rest2, flags2 = parse_flags(['launcher.py', 'gioco.py', '--stats'])
@@ -209,6 +209,70 @@ check("--playtest-quick: rimosso da argv", rest4j, ['launcher.py', 'gioco.py'])
 rest4k, flags4k = parse_flags(['launcher.py', 'gioco.py', '--gpu-renderer'])
 check("--gpu-renderer: imposta renderer='gpu'", flags4k['renderer'], 'gpu')
 check("--gpu-renderer: rimosso da argv", rest4k, ['launcher.py', 'gioco.py'])
+
+# ---------------------------------------------------------------
+# --netplay-host / --netplay-join: consumano 2 argomenti SUCCESSIVI
+# (porta+num_giocatori, o ip+porta) - a differenza di tutti gli
+# altri flag, che sono semplici booleani. Lasciati fuori dal kit di
+# rete originale apposta ("meglio scriverlo voi seguendo lo stile
+# esistente"), aggiunti qui.
+# ---------------------------------------------------------------
+rest4l, flags4l = parse_flags(['launcher.py', 'gioco.py', '--netplay-host', '5555', '3'])
+check("--netplay-host: porta interpretata correttamente", flags4l['netplay_host_port'], 5555)
+check("--netplay-host: numero giocatori interpretato correttamente", flags4l['netplay_host_players'], 3)
+check("--netplay-host: consuma i suoi 2 argomenti, non li lascia in argv", rest4l, ['launcher.py', 'gioco.py'])
+check("--netplay-host: netplay_join_addr resta None", flags4l['netplay_join_addr'], None)
+
+rest4m, flags4m = parse_flags(['launcher.py', 'gioco.py', '--netplay-join', '192.168.1.5', '5555'])
+check("--netplay-join: (ip, porta) interpretati correttamente", flags4m['netplay_join_addr'], ('192.168.1.5', 5555))
+check("--netplay-join: consuma i suoi 2 argomenti", rest4m, ['launcher.py', 'gioco.py'])
+check("--netplay-join: netplay_host_port resta None", flags4m['netplay_host_port'], None)
+
+# argomenti mancanti - deve fallire in modo chiaro, non con un
+# IndexError o silenziosamente
+try:
+    parse_flags(['launcher.py', 'gioco.py', '--netplay-host'])
+    check("--netplay-host senza argomenti: doveva sollevare LauncherError", False, True)
+except LauncherError:
+    check("--netplay-host senza argomenti: solleva LauncherError come atteso", True, True)
+
+try:
+    parse_flags(['launcher.py', 'gioco.py', '--netplay-host', '5555'])
+    check("--netplay-host con un solo argomento: doveva sollevare LauncherError", False, True)
+except LauncherError:
+    check("--netplay-host con un solo argomento: solleva LauncherError come atteso", True, True)
+
+# valori non numerici dove serve un numero
+try:
+    parse_flags(['launcher.py', 'gioco.py', '--netplay-host', 'abc', '2'])
+    check("--netplay-host con porta non numerica: doveva sollevare LauncherError", False, True)
+except LauncherError:
+    check("--netplay-host con porta non numerica: solleva LauncherError come atteso", True, True)
+
+try:
+    parse_flags(['launcher.py', 'gioco.py', '--netplay-join', '192.168.1.5', 'abc'])
+    check("--netplay-join con porta non numerica: doveva sollevare LauncherError", False, True)
+except LauncherError:
+    check("--netplay-join con porta non numerica: solleva LauncherError come atteso", True, True)
+
+# numero giocatori fuori dal range valido (2-8: sotto 2 non e'
+# multiplayer, EXTRA_INPUT_PORTS in cpu.py copre al massimo 8 in
+# totale)
+for _n_non_valido in (0, 1, 9, 99):
+    try:
+        parse_flags(['launcher.py', 'gioco.py', '--netplay-host', '5555', str(_n_non_valido)])
+        check(f"--netplay-host con {_n_non_valido} giocatori (fuori range 2-8): doveva sollevare LauncherError", False, True)
+    except LauncherError:
+        check(f"--netplay-host con {_n_non_valido} giocatori (fuori range 2-8): solleva LauncherError come atteso", True, True)
+
+# nessun flag di rete -> tutti None, nessuna interferenza con gli
+# altri flag esistenti
+rest4n, flags4n = parse_flags(['launcher.py', 'gioco.py', '--stats', '--fullscreen'])
+check("nessun flag di rete: i tre campi netplay restano None",
+      (flags4n['netplay_host_port'], flags4n['netplay_host_players'], flags4n['netplay_join_addr']),
+      (None, None, None))
+check("nessun flag di rete: gli altri flag continuano a funzionare normalmente",
+      (flags4n['stats'], flags4n['fullscreen']), (True, True))
 
 # ---------------------------------------------------------------
 # _sdl2_video(): compatibilita' pygame-ce (nomi diretti) vs pygame
@@ -512,6 +576,143 @@ try:
     check("run_benchmark(profile=True): elenca le funzioni (cumulative)", 'cumulative' in text2, True)
 finally:
     shutil.rmtree(tmpdir2)
+
+# ---------------------------------------------------------------
+# Test 12: AudioPlayer riceve il banco suoni DALL'ESTERNO (dalla
+# cartuccia, via cpu.sound_bank) - non lo costruisce piu' da solo.
+# Corretto dopo che l'utente ha notato che i suoni di Adventure
+# erano finiti per errore nel motore invece che nella cartuccia.
+# ---------------------------------------------------------------
+from launcher import AudioPlayer
+import types as _types_audio
+
+_pygame_audio = _types_audio.ModuleType('pygame_audio_fake')
+_pygame_audio.mixer = _types_audio.SimpleNamespace(
+    init=lambda **k: None,
+    get_init=lambda: (22050, -16, 1),
+    Sound=lambda buffer: _types_audio.SimpleNamespace(play=lambda: None),
+)
+
+_ap_vuoto = AudioPlayer(_pygame_audio, enabled=True, sound_bank=None)
+check("AudioPlayer: sound_bank=None -> nessun suono caricato ma mixer attivo",
+      (_ap_vuoto.enabled, len(_ap_vuoto.sounds)), (True, 0))
+
+_banco_finto = {1: b'\x00\x00' * 10, 2: b'\x00\x00' * 10}
+_ap_pieno = AudioPlayer(_pygame_audio, enabled=True, sound_bank=_banco_finto)
+check("AudioPlayer: carica esattamente i suoni ricevuti dal banco passato",
+      set(_ap_pieno.sounds.keys()), {1, 2})
+
+_ap_off = AudioPlayer(_pygame_audio, enabled=False, sound_bank=_banco_finto)
+check("AudioPlayer: enabled=False -> non carica nulla anche con un banco valido",
+      (_ap_off.enabled, len(_ap_off.sounds)), (False, 0))
+
+# -- verifica end-to-end: _load_cart_graphics carica DAVVERO il
+# banco suoni della cartuccia in cpu.sound_bank (non un mock - il
+# vero cart.py/sound_bank.py di Adventure) --
+from launcher import CART_LOAD_ADDR
+_rom_audio, _ = load_cart_rom(
+    os.path.join(os.path.dirname(__file__), '..', 'carts', 'adventure_asm', 'game.asm'), 'asm')
+_c_audio = CPU()
+for _i, _b in enumerate(_rom_audio):
+    _c_audio.mem[CART_LOAD_ADDR + _i] = _b
+_load_cart_graphics(_c_audio, os.path.join(os.path.dirname(__file__), '..', 'carts', 'adventure_asm'))
+check("_load_cart_graphics: popola cpu.sound_bank con i 9 suoni di Adventure",
+      sorted(_c_audio.sound_bank.keys()), list(range(1, 10)))
+
+_c_senza_cart = CPU()
+_load_cart_graphics(_c_senza_cart, tempfile.mkdtemp(prefix='s32_no_cart_'))
+check("_load_cart_graphics: senza cart.py, sound_bank resta vuoto (nessun crash)",
+      _c_senza_cart.sound_bank, {})
+
+# ---------------------------------------------------------------
+# Test 13: aggancio netcode nel game loop (_run_pygame_loop) -
+# verifica che una sessione di rete (host o client di
+# netcode_lockstep.py) venga davvero usata: input locale inviato ad
+# ogni frame, un frame "in lag" (risposta non ancora arrivata)
+# ririchiesto SENZA far avanzare la simulazione, poi ripresa normale
+# una volta risolto. Mock completo di pygame, non solo GpuRenderer -
+# qui serve l'intero _run_pygame_loop.
+# ---------------------------------------------------------------
+import types as _types_net, io as _io_net, contextlib as _ctx_net
+from unittest.mock import MagicMock as _MagicMock_net
+
+_pygame_net = _types_net.ModuleType('pygame_netcode_fake')
+_pygame_net.QUIT = 1
+_pygame_net.SRCALPHA = 4
+
+class _FakeSurfaceNet:
+    def __init__(self, *a, **k): pass
+    def scroll(self, dx, dy): pass
+    def blit(self, *a, **k): pass
+    def convert(self): return self
+    def set_at(self, *a, **k): pass
+    def fill(self, *a, **k): pass
+
+class _FakeClockNet:
+    def tick(self, fps): pass
+
+_pygame_net.init = _MagicMock_net()
+_pygame_net.get_init = _MagicMock_net(return_value=False)
+_pygame_net.mixer = _MagicMock_net()
+_pygame_net.mouse = _MagicMock_net()
+_pygame_net.display = _MagicMock_net()
+_pygame_net.display.set_mode = _MagicMock_net(return_value=_FakeSurfaceNet())
+_pygame_net.display.flip = _MagicMock_net()
+_pygame_net.display.update = _MagicMock_net()
+_pygame_net.event = _MagicMock_net()
+_pygame_net.event.get = _MagicMock_net(return_value=[])
+_pygame_net.key = _MagicMock_net()
+_pygame_net.key.get_pressed = _MagicMock_net(return_value={})
+_pygame_net.time = _MagicMock_net()
+_pygame_net.time.Clock = _MagicMock_net(return_value=_FakeClockNet())
+_pygame_net.Surface = _FakeSurfaceNet
+_pygame_net.Rect = lambda x, y, w, h: _types_net.SimpleNamespace(x=x, y=y, w=w, h=h, topleft=(x, y))
+_pygame_net.image = _MagicMock_net()
+_pygame_net.image.frombuffer = _MagicMock_net(return_value=_FakeSurfaceNet())
+
+class _FintaSessioneNetcode:
+    """Finge una LockstepHost/LockstepClient: per i primi N tentativi
+    di un dato frame risponde None (input non ancora arrivato da
+    tutti - simula lag), poi risponde con un vettore a 2 giocatori."""
+    def __init__(self, frame_saltati_prima_di_rispondere=3):
+        self.invii = []
+        self.richieste = []
+        self.frame_saltati_prima_di_rispondere = frame_saltati_prima_di_rispondere
+        self._tentativi_per_frame = {}
+        self._ultimo_input_locale = 0
+
+    def submit_local_input(self, frame_number, input_byte):
+        self._ultimo_input_locale = input_byte
+        self.invii.append((frame_number, input_byte))
+
+    def get_frame_inputs(self, frame_number, timeout=0.25):
+        self.richieste.append(frame_number)
+        tentativi = self._tentativi_per_frame.get(frame_number, 0)
+        self._tentativi_per_frame[frame_number] = tentativi + 1
+        if tentativi < self.frame_saltati_prima_di_rispondere:
+            return None
+        return (self._ultimo_input_locale, 0x07)  # giocatore locale + un secondo finto
+
+_sys.modules['pygame'] = _pygame_net
+import importlib
+import launcher
+importlib.reload(launcher)
+
+_sessione_netcode = _FintaSessioneNetcode(frame_saltati_prima_di_rispondere=3)
+_buf_net = _io_net.StringIO()
+with _ctx_net.redirect_stdout(_buf_net):
+    launcher.run_direct(
+        os.path.join(os.path.dirname(__file__), '..', 'carts', 'adventure_asm', 'game.asm'), 'asm',
+        show_stats=False, quit_pygame_at_end=False, renderer_mode='dirty-rects',
+        playtest=True, playtest_quick=True,
+        netcode_session=_sessione_netcode, local_player_index=0)
+
+check("netcode: l'input locale viene DAVVERO inviato alla sessione ad ogni frame",
+      len(_sessione_netcode.invii) > 0, True)
+check("netcode: un frame in lag viene ririchiesto esattamente (tentativi_lag + 1) volte",
+      _sessione_netcode.richieste.count(0), _sessione_netcode.frame_saltati_prima_di_rispondere + 1)
+check("netcode: dopo il lag simulato, la sessione arriva a richiedere frame successivi (la simulazione riprende)",
+      max(_sessione_netcode.richieste) > 0, True)
 
 print()
 if fails == 0:
