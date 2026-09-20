@@ -1773,3 +1773,41 @@ Pi 1 vera per confermare quanto pesa DAVVERO lo sfondo la' - se e'
 confermato, l'ottimizzazione da seguire e' ridurre il costo del draw
 dello sfondo (es. dirty-rect anche per il draw finale, non solo per
 `texture_update`), non piu' l'atlas sprite (gia' a posto).
+
+## Secondo giro di dati reali: non e' l'area, e' (probabilmente) l'alpha blending
+
+L'utente ha rilanciato `bench_gpu_draw.py` sulla Pi 1 vera. Risultato
+sorprendente: un tile 32x32 e lo sfondo 480x320 costano quasi lo
+STESSO (~1.2-1.3ms) - NON e' quindi un costo che scala con l'area
+disegnata come ipotizzato (fill rate), smentendo l'ipotesi
+precedente. E' piuttosto un costo FISSO legato al primo `draw()` del
+frame (le chiamate successive costano una frazione - il costo
+marginale scende da ~1.19ms per la prima a ~0.11ms per la sedicesima,
+coerente con un costo ammortizzato su piu' chiamate). Ma questo
+lasciava ancora un fattore ~7x scoperto: il benchmark isolato
+"sfondo+7 sprite" costava ~1.9ms, contro i ~12-14ms di `draw_sprites`
+nel gioco vero.
+
+**Nuova ipotesi, verificata per introspezione diretta su pygame-ce**:
+ALPHA BLENDING. L'atlas sprite (`sprite_atlas_surface` in
+`GpuRenderer`) e' una `pygame.Surface` con `SRCALPHA` (i bordi
+trasparenti degli sprite lo richiedono) - `Texture.from_surface()` su
+una Surface `SRCALPHA` imposta AUTOMATICAMENTE `blend_mode =
+BLENDMODE_BLEND` sulla texture risultante, confermato con un test
+diretto (`BLENDMODE_NONE=0` per una Surface opaca, `BLENDMODE_BLEND=1`
+per una `SRCALPHA`, anche con alpha=255 su ogni pixel - e' la sola
+PRESENZA del canale alpha a decidere, non il suo valore). Tutti i
+tile usati nei benchmark precedenti erano OPACHI (`BLENDMODE_NONE`,
+il caso piu' veloce per una GPU) - non rappresentativi del vero atlas
+sprite, che disegna sempre in `BLENDMODE_BLEND`.
+
+`bench_gpu_draw.py` ora confronta DIRETTAMENTE lo stesso tile 32x32,
+stesso contenuto, disegnato OPACO contro `SRCALPHA`, per isolare il
+costo del blending sulla GPU del Pi 1 - se e' alto, spiega il
+fattore ~7x mancante molto meglio di "troppi sprite" o "sfondo
+troppo grande" (gia' esclusi dai dati sopra). Prossimo passo:
+l'utente rilancia lo script aggiornato sulla Pi 1 vera per la
+risposta definitiva. Se confermato, la cartuccia (o il motore) andra'
+guardato per capire se serve DAVVERO l'alpha blending per ogni sprite
+disegnato o se una trasparenza binaria (colorkey) potrebbe bastare
+per la maggior parte dei casi.

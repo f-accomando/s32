@@ -16,18 +16,29 @@ per rispondere a tre domande concrete:
      UN SOLO draw(), invece di N draw() separati dall'atlas? Lo
      script disegna lo STESSO NUMERO di pixel nei due modi e
      confronta.
-  3. NUOVO (dopo il primo giro di misure reali sulla Pi 1, vedi
-     README.md): il primo giro mostrava che disegnare 7 tile 32x32
-     costa solo ~1.7ms in isolamento - una FRAZIONE dei ~12-14ms
-     misurati per la voce 'draw_sprites' nel gioco vero. Motivo
-     trovato RILEGGENDO il codice sorgente: quella voce, prima di
-     questa versione dello script, includeva ANCHE renderer.clear()
-     e il draw dell'INTERO sfondo (480x320, un'area ~150 volte piu'
-     grande di un tile 32x32), non solo gli sprite - un'etichetta
-     fuorviante gia' corretta in launcher.py (ora clear/bg_draw/
-     sprite_draws sono tre timing separati). Questa funzione misura
-     ESATTAMENTE quella nuova ipotesi: il costo di disegnare lo
-     sfondo a schermo intero, isolato dagli sprite.
+  3. Quanto costa disegnare lo SFONDO a schermo intero (480x320,
+     come fa bg_texture.draw() nel gioco vero) rispetto a un piccolo
+     tile? SECONDO GIRO di dati reali sulla Pi 1: un tile 32x32 e lo
+     sfondo 480x320 costano quasi lo STESSO (~1.2-1.3ms) - quindi
+     NON e' un costo che scala con l'AREA disegnata. E' un costo
+     FISSO legato al primo draw() del frame (le chiamate successive
+     costano una frazione, vedi il costo marginale sopra) - ma questo
+     lascia ancora aperto un fattore ~7x tra "sfondo+7 sprite" isolato
+     (~1.9ms) e 'draw_sprites' nel gioco vero (~12-14ms).
+  4. NUOVO - ipotesi piu' probabile trovata rileggendo il codice:
+     ALPHA BLENDING. L'atlas sprite (`sprite_atlas_surface` in
+     GpuRenderer, launcher.py) e' un pygame.Surface con SRCALPHA (gli
+     sprite hanno bordi trasparenti) - Texture.from_surface() su una
+     Surface SRCALPHA imposta AUTOMATICAMENTE blend_mode=BLENDMODE_BLEND
+     sulla texture risultante (verificato per introspezione diretta:
+     BLENDMODE_NONE=0 per una Surface opaca, BLENDMODE_BLEND=1 per una
+     Surface SRCALPHA). Il tile usato nei test 1-3 sopra e' OPACO
+     (BLENDMODE_NONE, il caso piu' veloce per una GPU) - non
+     rappresentativo del vero atlas sprite. Questa funzione confronta
+     direttamente un tile OPACO contro un tile SRCALPHA (stessa
+     dimensione, stesso contenuto) per isolare il costo dell'alpha
+     blending sulla GPU del Pi 1 - se e' alto, e' la spiegazione del
+     fattore ~7x mancante, non il numero di tile ne' l'area disegnata.
 
 Uso: python3 bench_gpu_draw.py  (lanciarlo SULLA Pi 1 vera - qui in
 sviluppo i numeri non sono comparabili, nessuna GPU reale disponibile
@@ -147,6 +158,37 @@ def main():
         f"clear()+1 draw(480x320 sfondo)+{N_SPRITE_REALISTICO} draw(32x32 sprite)+present() [sequenza REALE]",
         _sfondo_piu_sprite)
 
+    # -- DOMANDA 4 (nuova): l'atlas sprite vero usa SRCALPHA (bordi
+    # trasparenti) -> Texture.from_surface() imposta automaticamente
+    # blend_mode=BLENDMODE_BLEND. Tutti i tile usati sopra sono
+    # OPACHI (BLENDMODE_NONE, il caso piu' veloce) - qui confrontiamo
+    # DIRETTAMENTE lo stesso tile 32x32, stesso contenuto, opaco
+    # contro alpha, per isolare il costo del blending sulla GPU --
+    tile_surf_alpha = pygame.Surface((32, 32), pygame.SRCALPHA)
+    tile_surf_alpha.fill((200, 80, 40, 255))  # alpha=255: OPACO nei
+                                                # pixel, ma la texture
+                                                # ha comunque un canale
+                                                # alpha - e' questo che
+                                                # attiva BLENDMODE_BLEND,
+                                                # non il valore alpha
+    tile_tex_alpha = video.Texture.from_surface(renderer, tile_surf_alpha)
+    print(f"\ntile OPACO: blend_mode={tile_tex.blend_mode} (0=NONE)   "
+          f"tile SRCALPHA: blend_mode={tile_tex_alpha.blend_mode} (1=BLEND)")
+
+    def _n_draws_alpha(n=N_SPRITE_REALISTICO):
+        renderer.clear()
+        for i in range(n):
+            tile_tex_alpha.draw(dstrect=((i % 15) * 32, 0, 32, 32))
+        renderer.present()
+    ms_n_alpha = _timeit(f"clear()+{N_SPRITE_REALISTICO} draw(32x32, SRCALPHA/BLEND)+present()", _n_draws_alpha)
+
+    def _n_draws_opaco(n=N_SPRITE_REALISTICO):
+        renderer.clear()
+        for i in range(n):
+            tile_tex.draw(dstrect=((i % 15) * 32, 0, 32, 32))
+        renderer.present()
+    ms_n_opaco = _timeit(f"clear()+{N_SPRITE_REALISTICO} draw(32x32, OPACO/NONE)+present()", _n_draws_opaco)
+
     print()
     print("=== riepilogo ===")
     print(f"overhead fisso di clear()+present() da soli: {ms_baseline:.3f} ms")
@@ -165,6 +207,13 @@ def main():
         quota_sfondo_pct = costo_sfondo / costo_sfondo_piu_sprite * 100
         commento = "e' quindi il vero collo di bottiglia" if quota_sfondo_pct > 50 else "gli sprite restano una quota significativa"
         print(f"-> lo SFONDO da solo spiega circa il {quota_sfondo_pct:.0f}% del costo combinato ({commento})")
+    costo_extra_alpha = ms_n_alpha - ms_n_opaco
+    pct_alpha = (costo_extra_alpha / ms_n_opaco * 100) if ms_n_opaco else 0
+    print(f"{N_SPRITE_REALISTICO} tile OPACHI: {ms_n_opaco:.3f} ms  vs  {N_SPRITE_REALISTICO} tile SRCALPHA (come l'atlas vero): "
+          f"{ms_n_alpha:.3f} ms -> differenza {costo_extra_alpha:+.3f} ms ({pct_alpha:+.0f}%)")
+    if costo_extra_alpha > 0.5:
+        print("-> L'ALPHA BLENDING costa significativamente di piu': e' probabilmente questa la causa "
+              "del divario tra il benchmark isolato e i ~12-14ms misurati nel gioco vero, non il numero di sprite.")
     print()
     print("Incolla questo intero output com'e' per l'analisi.")
 
