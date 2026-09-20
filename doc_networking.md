@@ -196,6 +196,14 @@ l'IP a mano**. Se la scansione non trova nulla (rete che blocca il
 broadcast, host su un'altra rete), ripiega sul form manuale
 (IP/porta). Vedi `README.md`, sezione sul mini-OS, per i dettagli.
 
+**Identita' dell'host** (vedi `s32/player_profile.py`): un nickname +
+un avatar (4 icone retro 16x16) scelti dal tasto **P** sulla griglia,
+passati a `start_netcode_host` come `host_name`/`avatar` - chi cerca
+partite li vede nella lista PRIMA di connettersi (il campo `avatar`
+viaggia nell'annuncio LAN, vedi `LanAnnouncer` sopra). Da CLI
+(`--netplay-host`) resta 'S32'/avatar 0 di default: nessun profilo
+associato a un lancio da riga di comando.
+
 ### `carts/barebone_p2p/`
 
 Cartuccia single-file (stessa convenzione di `carts/barebone/`) con 4

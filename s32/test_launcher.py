@@ -725,9 +725,10 @@ import netcode_lockstep as _ncl
 
 class _FakeAnnouncer:
     instances = []
-    def __init__(self, game_name, connect_port):
+    def __init__(self, game_name, connect_port, avatar=0):
         self.game_name = game_name
         self.connect_port = connect_port
+        self.avatar = avatar
         self.started = False
         self.stopped = False
         _FakeAnnouncer.instances.append(self)
@@ -757,6 +758,22 @@ try:
           _FakeAnnouncer.instances[0].started, True)
     check("start_netcode_host: smette di annunciare una volta partiti (stop chiamato)",
           _FakeAnnouncer.instances[0].stopped, True)
+    check("start_netcode_host: senza host_name/avatar, usa i default ('S32', 0)",
+          (_FakeAnnouncer.instances[0].game_name, _FakeAnnouncer.instances[0].avatar), ('S32', 0))
+finally:
+    _ncl.LockstepHost = _orig_LockstepHost
+    _ncl.LanAnnouncer = _orig_LanAnnouncer
+
+# host_name/avatar (dal profilo, vedi profile.py/os_menu.py) devono
+# arrivare fino a LanAnnouncer - chi cerca partite deve vedere
+# l'identita' scelta dall'utente, non sempre "S32"
+_ncl.LockstepHost = _FakeHostSession
+_ncl.LanAnnouncer = _FakeAnnouncer
+try:
+    _FakeAnnouncer.instances.clear()
+    launcher.start_netcode_host(12345, 2, host_name='Mario', avatar=2)
+    check("start_netcode_host: propaga host_name/avatar a LanAnnouncer",
+          (_FakeAnnouncer.instances[0].game_name, _FakeAnnouncer.instances[0].avatar), ('Mario', 2))
 finally:
     _ncl.LockstepHost = _orig_LockstepHost
     _ncl.LanAnnouncer = _orig_LanAnnouncer

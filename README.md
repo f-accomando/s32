@@ -1475,3 +1475,59 @@ Nessuna verifica visiva vera (nessun display disponibile in
 quest'ambiente) - solo il FLUSSO, non il disegno, esattamente come gia'
 sceglie di fare il resto del progetto per il codice che dipende da
 pygame.
+
+## Profilo giocatore (nickname + avatar), richiesto dall'utente
+
+Richiesta: un'icona avatar in alto a destra nel menu OS, da cui
+scegliere un avatar (4 icone retro 16x16, colori diversi) e un
+nickname - mostrati come identita' dell'host a chi cerca partite.
+
+**`s32/avatars/avatar_0.png`..`avatar_3.png`**: 4 "blob" pixel-art
+16x16 generati (rosso/blu/verde/giallo - bordo scuro, due occhi, una
+bocca), stessa tecnica gia' usata per `font_spritesheet.png`
+(script Pillow one-off, non nel repo - solo l'output).
+
+**`s32/player_profile.py`** (nuovo modulo): `load_profile()`/
+`save_profile(nickname, avatar)`, persistiti in
+`player_profile.json` accanto al modulo - stato PERSONALE della
+macchina, non del progetto (in `.gitignore`, mai committato). Pura
+logica, nessuna dipendenza da pygame, sanifica sempre l'input
+(nickname vuoto/troppo lungo, avatar fuori range) - non e' mai
+possibile ritrovarsi con un profilo non valido, nemmeno con un file
+corrotto a mano.
+
+**ATTENZIONE ALLA COLLISIONE DI NOME**: il modulo NON si chiama
+`profile.py` di proposito - con quel nome collide con il modulo
+della libreria standard di Python `profile` (usato internamente da
+`cProfile`, quindi da `--profile`/`run_benchmark(profile=True)`) -
+scritto per errore la prima volta, `import profile` dentro
+`cProfile.py` prendeva il MIO file invece dello stdlib, rompendo
+`--profile` con un `AttributeError` oscuro (`module 'profile' has no
+attribute 'run'`). Trovato subito eseguendo la suite di test
+completa dopo la prima stesura, prima di procedere oltre.
+
+**`netcode_lockstep.py`**: `LanAnnouncer`/`LanBrowser` ora
+scambiano anche un campo `avatar` nell'annuncio broadcast (oltre a
+`name`/`port` gia' esistenti) - retrocompatibile (`.get('avatar', 0)`
+lato browser, se un host piu' vecchio non lo manda).
+
+**`launcher.py`**: `start_netcode_host(port, num_players,
+host_name='S32', avatar=0)` - i due nuovi parametri sono opzionali
+con default identici al comportamento precedente (la CLI
+`--netplay-host` non ha un profilo, resta 'S32'/0).
+
+**`os_menu.py`**: avatar+nickname disegnati in alto a destra sulla
+griglia (tasto **P** per aprire l'editor - SOLO le frecce, non
+'wasd', cambiano l'avatar nell'editor: 'a'/'d' sono lettere valide
+nel nickname, riusarle come scorciatoia le avrebbe rese impossibili
+da digitare). "Ospita partita" passa `profile['nickname']`/
+`['avatar']` a `start_netcode_host`. La schermata "Unisciti a
+partita" (lista degli host trovati) disegna l'avatar di ogni host
+accanto al nome - `_draw_join_pick_screen`, nuova, sostituisce il
+riuso generico di `_draw_list_screen` solo per questa schermata (le
+altre liste, es. "Locale/Ospita/Unisciti", non hanno avatar).
+
+40 nuovi test (19 in `test_player_profile.py` - default, save/load,
+sanificazione, file corrotto/parziale; 8 in `test_os_menu.py` - flusso
+completo apri-profilo/digita/scegli-avatar/salva verificato fino a
+`start_netcode_host`, ESC annulla senza salvare). 400 test totali.

@@ -41,6 +41,7 @@ import os
 
 from carts_registry import discover_carts, ICON_WIDTH_PX, ICON_HEIGHT_PX
 from menu_state import MenuState
+import player_profile
 
 GRID_COLUMNS = 4
 ICON_SCALE = 3  # icona sorgente 32x40 (vedi carts_registry.py),
@@ -59,6 +60,11 @@ WINDOW_H = 520
 
 DIGITS = set('0123456789')
 IP_CHARS = set('0123456789.')
+
+AVATAR_SCALE = 2  # avatar sorgente 16x16 (vedi player_profile.py),
+                   # disegnato a schermo 2x piu' grande
+AVATAR_DRAW_SIZE = 16 * AVATAR_SCALE
+PROFILE_BADGE_MARGIN = 16  # distanza dal bordo per l'avatar in alto a destra
 
 
 def _grid_positions(n, columns, cell_w, cell_h, gap_x, gap_y, origin_x=0, origin_y=0):
@@ -115,6 +121,67 @@ def _load_icon_surface(pygame, cart):
     return surf
 
 
+def _load_avatar_surface(pygame, avatar_index, size=AVATAR_DRAW_SIZE):
+    """Carica e ridimensiona avatars/avatar_N.png - se manca o e'
+    illeggibile, un quadrato grigio di ripiego (stesso principio di
+    _load_icon_surface per le cartucce: MAI un crash per un asset
+    mancante)."""
+    path = player_profile.avatar_path(avatar_index)
+    try:
+        raw = pygame.image.load(path).convert_alpha()
+        return pygame.transform.scale(raw, (size, size))
+    except Exception:
+        surf = pygame.Surface((size, size))
+        surf.fill((90, 90, 100))
+        return surf
+
+
+def _draw_profile_badge(screen, pygame, font_small, profile, avatar_cache):
+    """Avatar + nickname in alto a destra della griglia - l'identita'
+    mostrata come host quando si ospita una partita (vedi
+    launch_host: passa profile['nickname']/['avatar'] a
+    start_netcode_host). 'P' dalla griglia apre la schermata per
+    cambiarli (vedi stato 'profile')."""
+    avatar_index = profile['avatar']
+    if avatar_index not in avatar_cache:
+        avatar_cache[avatar_index] = _load_avatar_surface(pygame, avatar_index)
+    avatar = avatar_cache[avatar_index]
+    x = WINDOW_W - PROFILE_BADGE_MARGIN - AVATAR_DRAW_SIZE
+    y = PROFILE_BADGE_MARGIN
+    screen.blit(avatar, (x, y))
+    label = font_small.render(profile['nickname'], True, (200, 200, 210))
+    screen.blit(label, (x - label.get_width() - 8, y + (AVATAR_DRAW_SIZE - label.get_height()) // 2))
+    hint = font_small.render("P", True, (120, 120, 130))
+    screen.blit(hint, (x + AVATAR_DRAW_SIZE // 2 - 4, y + AVATAR_DRAW_SIZE + 4))
+
+
+def _draw_profile_screen(screen, pygame, fonts, nickname_field, avatar_index, avatar_cache):
+    font, font_small, font_title = fonts
+    title = font_title.render("Il tuo profilo", True, (230, 230, 240))
+    screen.blit(title, (GRID_ORIGIN_X, 40))
+
+    label = font.render(f"Nickname: {nickname_field.value}_", True, (255, 220, 100))
+    screen.blit(label, (GRID_ORIGIN_X, 110))
+
+    avatar_label = font_small.render("Avatar (frecce sinistra/destra):", True, (180, 180, 190))
+    screen.blit(avatar_label, (GRID_ORIGIN_X, 160))
+
+    x = GRID_ORIGIN_X
+    y = 190
+    for i in range(player_profile.AVATAR_COUNT):
+        if i not in avatar_cache:
+            avatar_cache[i] = _load_avatar_surface(pygame, i)
+        selected = (i == avatar_index)
+        if selected:
+            pygame.draw.rect(screen, (255, 220, 100),
+                              (x - 4, y - 4, AVATAR_DRAW_SIZE + 8, AVATAR_DRAW_SIZE + 8), width=3)
+        screen.blit(avatar_cache[i], (x, y))
+        x += AVATAR_DRAW_SIZE + 20
+
+    hint = font_small.render("invio: salva   esc: annulla", True, (120, 120, 130))
+    screen.blit(hint, (GRID_ORIGIN_X, WINDOW_H - 30))
+
+
 def _entry_and_kind(cart):
     entry = cart.entry_py() or cart.entry_asm()
     kind = 'py' if cart.entry_py() else 'asm'
@@ -139,10 +206,11 @@ def _friendly_netcode_error(exc, port):
     return base
 
 
-def _draw_grid_screen(screen, pygame, fonts, carts_dir, grid, icon_cache):
+def _draw_grid_screen(screen, pygame, fonts, carts_dir, grid, icon_cache, profile, avatar_cache):
     font, font_small, font_title = fonts
     title = font_title.render("S32", True, (230, 230, 240))
     screen.blit(title, (GRID_ORIGIN_X, 24))
+    _draw_profile_badge(screen, pygame, font_small, profile, avatar_cache)
 
     if grid.is_empty():
         text = font.render("NO ROM FOUND", True, (200, 90, 90))
@@ -167,7 +235,7 @@ def _draw_grid_screen(screen, pygame, fonts, carts_dir, grid, icon_cache):
         label_x = x + (ICON_DRAW_W - label.get_width()) // 2
         screen.blit(label, (label_x, y + ICON_DRAW_H + 6))
 
-    hint = font_small.render("frecce: muovi   invio/J: scegli   esc: esci", True, (120, 120, 130))
+    hint = font_small.render("frecce: muovi   invio/J: scegli   P: profilo   esc: esci", True, (120, 120, 130))
     screen.blit(hint, (GRID_ORIGIN_X, WINDOW_H - 30))
 
 
@@ -181,6 +249,34 @@ def _draw_list_screen(screen, font, font_title, heading, list_menu, font_small=N
         screen.blit(text, (GRID_ORIGIN_X, y))
         y += 40
     if error_message and font_small is not None:
+        err = font_small.render(error_message, True, (220, 90, 90))
+        screen.blit(err, (GRID_ORIGIN_X, y + 10))
+
+
+def _draw_join_pick_screen(screen, pygame, fonts, list_menu, scan_results, avatar_cache, error_message):
+    """Come _draw_list_screen, ma disegna anche l'avatar di ogni host
+    trovato (vedi LanAnnouncer/LanBrowser in netcode_lockstep.py) - la
+    riga finale ("inserisci IP manualmente") non ha un host dietro,
+    quindi nessun avatar per lei."""
+    font, font_small, font_title = fonts
+    title = font_title.render("Partite trovate sulla rete locale:", True, (230, 230, 240))
+    screen.blit(title, (GRID_ORIGIN_X, 40))
+
+    avatar_size = 28
+    y = 100
+    for i, label in enumerate(list_menu.items):
+        color = (255, 220, 100) if i == list_menu.index else (200, 200, 200)
+        text_x = GRID_ORIGIN_X
+        if i < len(scan_results):
+            avatar_index = scan_results[i].get('avatar', 0)
+            if avatar_index not in avatar_cache:
+                avatar_cache[avatar_index] = _load_avatar_surface(pygame, avatar_index, size=avatar_size)
+            screen.blit(avatar_cache[avatar_index], (GRID_ORIGIN_X, y))
+            text_x = GRID_ORIGIN_X + avatar_size + 10
+        text = font.render(label, True, color)
+        screen.blit(text, (text_x, y + (avatar_size - text.get_height()) // 2))
+        y += max(avatar_size, text.get_height()) + 12
+    if error_message:
         err = font_small.render(error_message, True, (220, 90, 90))
         screen.blit(err, (GRID_ORIGIN_X, y + 10))
 
@@ -224,6 +320,8 @@ def run_os_menu():
     fonts = (pygame.font.SysFont(None, 26), pygame.font.SysFont(None, 18), pygame.font.SysFont(None, 40))
     clock = pygame.time.Clock()
     icon_cache = {}
+    avatar_cache = {}
+    profile = player_profile.load_profile()
 
     state = 'grid'
     chosen_cart = None
@@ -234,6 +332,8 @@ def run_os_menu():
     join_focus = None
     join_pick_menu = None
     join_scan_results = []
+    profile_nickname_field = None
+    profile_avatar_index = None
     error_message = None
 
     while True:
@@ -266,6 +366,30 @@ def run_os_menu():
                     mode_menu = MenuState(['Locale (1 giocatore)', 'Ospita partita in rete', 'Unisciti a partita in rete'])
                     error_message = None
                     state = 'mode'
+                elif event.key == pygame.K_p:
+                    profile_nickname_field = TextField(profile['nickname'], max_len=player_profile.MAX_NICKNAME_LEN,
+                                                        allowed=player_profile.NICKNAME_CHARS)
+                    profile_avatar_index = profile['avatar']
+                    state = 'profile'
+
+            elif state == 'profile':
+                # NOTA: qui SOLO le frecce (non 'wasd' come nella
+                # griglia) - 'a'/'d' sono lettere valide nel nickname,
+                # usarle anche come scorciatoia per l'avatar le
+                # renderebbe impossibili da digitare
+                if event.key == pygame.K_ESCAPE:
+                    state = 'grid'  # annulla: NON salva le modifiche
+                elif event.key == pygame.K_LEFT:
+                    profile_avatar_index = (profile_avatar_index - 1) % player_profile.AVATAR_COUNT
+                elif event.key == pygame.K_RIGHT:
+                    profile_avatar_index = (profile_avatar_index + 1) % player_profile.AVATAR_COUNT
+                elif event.key == pygame.K_BACKSPACE:
+                    profile_nickname_field.backspace()
+                elif event.key == pygame.K_RETURN:
+                    profile = player_profile.save_profile(profile_nickname_field.value, profile_avatar_index)
+                    state = 'grid'
+                else:
+                    profile_nickname_field.add_char(event.unicode)
 
             elif state == 'mode':
                 if event.key == pygame.K_ESCAPE:
@@ -369,7 +493,8 @@ def run_os_menu():
                                None, f"In attesa di {num_giocatori} giocatori...")
             pygame.display.flip()
             try:
-                netcode_session, local_idx = start_netcode_host(porta, num_giocatori)
+                netcode_session, local_idx = start_netcode_host(
+                    porta, num_giocatori, host_name=profile['nickname'], avatar=profile['avatar'])
             except (ValueError, TimeoutError, OSError) as exc:
                 error_message = _friendly_netcode_error(exc, porta)
                 state = 'host'
@@ -472,7 +597,9 @@ def run_os_menu():
         # -- disegno --
         screen.fill((18, 18, 26))
         if state == 'grid':
-            _draw_grid_screen(screen, pygame, fonts, carts_dir, grid, icon_cache)
+            _draw_grid_screen(screen, pygame, fonts, carts_dir, grid, icon_cache, profile, avatar_cache)
+        elif state == 'profile':
+            _draw_profile_screen(screen, pygame, fonts, profile_nickname_field, profile_avatar_index, avatar_cache)
         elif state == 'mode':
             _draw_list_screen(screen, fonts[0], fonts[2], f'Come vuoi giocare a "{chosen_cart.title}"?', mode_menu)
         elif state == 'host':
@@ -481,8 +608,8 @@ def run_os_menu():
                                 ('Numero giocatori', 'giocatori', host_fields['giocatori'])],
                                host_focus, error_message)
         elif state == 'join_pick':
-            _draw_list_screen(screen, fonts[0], fonts[2], "Partite trovate sulla rete locale:",
-                               join_pick_menu, font_small=fonts[1], error_message=error_message)
+            _draw_join_pick_screen(screen, pygame, fonts, join_pick_menu, join_scan_results,
+                                    avatar_cache, error_message)
         elif state == 'join':
             _draw_form_screen(screen, fonts[0], fonts[2], fonts[1], "Unisciti a partita",
                                [('IP host', 'ip', join_fields['ip']),

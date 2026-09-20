@@ -1275,12 +1275,16 @@ def _print_playtest_summary(phase_stats, renderer_mode, wall_seconds):
     print()
 
 
-def start_netcode_host(port, num_players):
+def start_netcode_host(port, num_players, host_name='S32', avatar=0):
     """Costruisce e avvia un LockstepHost (vedi netcode_lockstep.py),
     bloccando finche' non si sono connessi tutti i giocatori. Estratta
     da main() apposta: la usano sia il flag CLI --netplay-host sia la
     schermata "Ospita partita" del menu OS (os_menu.py) - stessa
     identica logica, un solo posto da mantenere.
+
+    host_name/avatar: identita' mostrata a chi cerca partite (vedi
+    profile.py) - di default 'S32'/0 per la CLI, che non ha un
+    profilo. Il menu OS passa il nickname/avatar scelto dall'utente.
 
     Annuncia la lobby sulla LAN per tutta l'attesa (LanAnnouncer, vedi
     discover_netcode_hosts()) - cosi' chi si unisce dal menu OS non
@@ -1290,7 +1294,7 @@ def start_netcode_host(port, num_players):
     from netcode_lockstep import LockstepHost, LanAnnouncer
     print(f"[netplay] host in ascolto sulla porta {port}, "
           f"aspetto {num_players} giocatori...")
-    announcer = LanAnnouncer(game_name='S32', connect_port=port)
+    announcer = LanAnnouncer(game_name=host_name, connect_port=port, avatar=avatar)
     announcer.start()
     try:
         session = LockstepHost(num_players=num_players, bind_port=port)
