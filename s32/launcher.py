@@ -32,8 +32,6 @@ from memory_map import (
     VRAM_SIZE, OAM_SIZE, CGRAM_SIZE, VRAM_BASE, OAM_BASE, CGRAM_BASE,
     OAM_SLOT_BYTES, TILE_SIZE_PX, SCREEN_W_PX, SCREEN_H_PX,
 )
-from carts_registry import discover_carts
-from menu_state import MenuState
 
 CART_LOAD_ADDR = 0x001000  # dove il programma di una cartuccia viene
                             # caricato in WRAM (lontano dagli
@@ -169,7 +167,12 @@ def _load_cart_graphics(cpu, cart_dir):
 
 def run_direct(path, kind, show_stats=False, quit_pygame_at_end=True, renderer_mode='dirty-rects', fullscreen=False, use_audio=False, playtest=False, playtest_quick=False, netcode_session=None, local_player_index=0):
     """Bypassa il menu, carica ed esegue direttamente la cartuccia
-    data - stesso comportamento immediato della v1 (python3 main.py)."""
+    data - stesso comportamento immediato della v1 (python3 main.py).
+
+    Ritorna True se l'utente ha chiuso la FINESTRA (pygame.QUIT)
+    durante la partita, False se il loop si e' fermato per un altro
+    motivo (ESC, fine sequenza --playtest) - os_menu.py lo usa per
+    decidere se tornare al menu o chiudere tutto il programma."""
     if not os.path.isfile(path):
         raise LauncherError(
             f'File non trovato: "{path}" (risolto come "{os.path.abspath(path)}" '
@@ -188,10 +191,10 @@ def run_direct(path, kind, show_stats=False, quit_pygame_at_end=True, renderer_m
     cart_dir = os.path.dirname(path)
     _load_cart_graphics(cpu, cart_dir)
 
-    _run_pygame_loop(cpu, show_stats=show_stats, quit_pygame_at_end=quit_pygame_at_end,
-                      renderer_mode=renderer_mode, fullscreen=fullscreen,
-                      use_audio=use_audio, playtest=playtest, playtest_quick=playtest_quick,
-                      netcode_session=netcode_session, local_player_index=local_player_index)
+    return _run_pygame_loop(cpu, show_stats=show_stats, quit_pygame_at_end=quit_pygame_at_end,
+                             renderer_mode=renderer_mode, fullscreen=fullscreen,
+                             use_audio=use_audio, playtest=playtest, playtest_quick=playtest_quick,
+                             netcode_session=netcode_session, local_player_index=local_player_index)
 
 
 def _init_pygame_once():
@@ -1066,10 +1069,17 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
     frame_number = 0
 
     running = True
+    quit_requested = False  # True SOLO se l'utente ha chiuso la finestra
+                             # (pygame.QUIT) - ESC/fine partita fermano
+                             # questo loop ma NON devono chiudere il
+                             # processo quando chi chiama e' il menu OS
+                             # (vedi os_menu.py: torna al menu su ESC,
+                             # chiude tutto solo su QUIT vero)
     while running:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+                quit_requested = True
 
         current_phase = None
         if playtest_seq is not None:
@@ -1211,6 +1221,8 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
     if quit_pygame_at_end:
         pygame.quit()
 
+    return quit_requested
+
 
 def _print_playtest_summary(phase_stats, renderer_mode, wall_seconds):
     """Tabella finale di --playtest, pensata per essere copiata e
@@ -1263,67 +1275,31 @@ def _print_playtest_summary(phase_stats, renderer_mode, wall_seconds):
     print()
 
 
-def run_os_menu():
-    """Mostra il menu di avvio (scoperta cartucce + selezione),
-    poi lancia quella scelta tramite run_direct. Si apre SEMPRE,
-    anche senza cartucce trovate - mostra un messaggio invece di
-    chiudersi silenziosamente in console.
+def start_netcode_host(port, num_players):
+    """Costruisce e avvia un LockstepHost (vedi netcode_lockstep.py),
+    bloccando finche' non si sono connessi tutti i giocatori. Estratta
+    da main() apposta: la usano sia il flag CLI --netplay-host sia la
+    schermata "Ospita partita" del menu OS (os_menu.py) - stessa
+    identica logica, un solo posto da mantenere."""
+    from netcode_lockstep import LockstepHost
+    print(f"[netplay] host in ascolto sulla porta {port}, "
+          f"aspetto {num_players} giocatori...")
+    session = LockstepHost(num_players=num_players, bind_port=port)
+    session.wait_for_players()
+    print("[netplay] tutti i giocatori connessi, si parte")
+    return session, 0  # l'host e' sempre il giocatore 0
 
-    NOTA: la sessione pygame resta la STESSA dall'inizio alla fine
-    (menu incluso) - passare dal menu al gioco NON chiude e riapre
-    la finestra, solo la ridimensiona (pygame.display.set_mode() puo'
-    essere richiamato piu' volte sulla stessa sessione). Prima
-    capitava il contrario: pygame.quit() poi un pygame.init() da
-    zero, costoso e visibile come un lampeggio della finestra."""
-    pygame = _init_pygame_once()
 
-    carts_dir = os.path.join(os.path.dirname(__file__), '..', 'carts')
-    carts = discover_carts(carts_dir)
-    menu = MenuState(carts)
-
-    screen = pygame.display.set_mode((512, 448))
-    font = pygame.font.SysFont(None, 28)
-    font_small = pygame.font.SysFont(None, 20)
-    clock = pygame.time.Clock()
-
-    running = True
-    chosen = None
-    while running and chosen is None:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    running = False
-                elif not menu.is_empty():
-                    if event.key in (pygame.K_UP, pygame.K_w):
-                        menu.move_up()
-                    elif event.key in (pygame.K_DOWN, pygame.K_s):
-                        menu.move_down()
-                    elif event.key in (pygame.K_RETURN, pygame.K_j, pygame.K_SPACE):
-                        chosen = menu.selected()
-
-        screen.fill((20, 20, 30))
-        if menu.is_empty():
-            text = font.render("NO ROM FOUND", True, (200, 90, 90))
-            screen.blit(text, (40, 40))
-            hint = font_small.render(f"(cercato in: {os.path.abspath(carts_dir)})", True, (140, 140, 140))
-            screen.blit(hint, (40, 80))
-        else:
-            for i, cart in enumerate(menu.items):
-                color = (255, 220, 100) if i == menu.index else (200, 200, 200)
-                text = font.render(cart.title, True, color)
-                screen.blit(text, (40, 40 + i * 36))
-        pygame.display.flip()
-        clock.tick(30)
-
-    if chosen is not None:
-        entry = chosen.entry_py() or chosen.entry_asm()
-        kind = 'py' if chosen.entry_py() else 'asm'
-        run_direct(entry, kind)  # riusa la stessa sessione pygame,
-                                  # la chiude lui alla fine (default)
-    else:
-        pygame.quit()  # l'utente ha chiuso il menu senza scegliere
+def start_netcode_client(ip, port):
+    """Costruisce e avvia un LockstepClient, bloccando finche' l'host
+    non conferma la connessione. Estratta per lo stesso motivo di
+    start_netcode_host() - vedi li'."""
+    from netcode_lockstep import LockstepClient
+    print(f"[netplay] mi connetto a {ip}:{port}...")
+    session = LockstepClient()
+    local_player_index = session.connect(ip, host_port=port)
+    print(f"[netplay] connesso - sono il giocatore {local_player_index}")
+    return session, local_player_index
 
 
 def run_benchmark(path, kind, n_frames=120, profile=False):
@@ -1522,6 +1498,7 @@ def main():
     argv, flags = parse_flags(sys.argv)
     mode = determine_mode(argv)
     if mode[0] == 'menu':
+        from os_menu import run_os_menu
         run_os_menu()
     else:
         _, path, kind = mode
@@ -1531,22 +1508,11 @@ def main():
             netcode_session = None
             local_player_index = 0
             if flags['netplay_host_port'] is not None:
-                from netcode_lockstep import LockstepHost
-                porta = flags['netplay_host_port']
-                num_giocatori = flags['netplay_host_players']
-                print(f"[netplay] host in ascolto sulla porta {porta}, "
-                      f"aspetto {num_giocatori} giocatori...")
-                netcode_session = LockstepHost(num_players=num_giocatori, bind_port=porta)
-                netcode_session.wait_for_players()
-                local_player_index = 0  # l'host e' sempre il giocatore 0
-                print("[netplay] tutti i giocatori connessi, si parte")
+                netcode_session, local_player_index = start_netcode_host(
+                    flags['netplay_host_port'], flags['netplay_host_players'])
             elif flags['netplay_join_addr'] is not None:
-                from netcode_lockstep import LockstepClient
                 ip, porta = flags['netplay_join_addr']
-                print(f"[netplay] mi connetto a {ip}:{porta}...")
-                netcode_session = LockstepClient()
-                local_player_index = netcode_session.connect(ip, host_port=porta)
-                print(f"[netplay] connesso - sono il giocatore {local_player_index}")
+                netcode_session, local_player_index = start_netcode_client(ip, porta)
 
             run_direct(path, kind, show_stats=flags['stats'], renderer_mode=flags['renderer'],
                        fullscreen=flags['fullscreen'], use_audio=flags['audio'], playtest=flags['playtest'],

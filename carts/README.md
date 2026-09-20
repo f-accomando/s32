@@ -16,6 +16,12 @@ carts/nome_gioco/
   cart.py            <- opzionale: build_vram(vram), build_cgram(cgram),
                        build_oam(oam), build_stages(dict) per il
                        contenuto grafico iniziale
+  icon.png            <- opzionale: icona nella griglia del menu OS,
+                       32x40px esatti (vedi os_menu.py) - senza,
+                       il menu disegna un riquadro grigio col titolo.
+                       Convenzione INDIPENDENTE dagli spritesheet di
+                       gioco (mai caricata in VRAM, la disegna
+                       direttamente pygame nel menu)
   *.png               <- spritesheet (uno o più), tile_size x tile_size
                        per cella - vedi spritesheet_tool.py
 ```
@@ -46,8 +52,15 @@ nella sua cartella.
 
 ## Avvio
 
-- `python3 s32/launcher.py` (nessun argomento) -> mostra il menu,
-  scopre le cartucce qui dentro, le elenca, lancia quella scelta
+- `python3 s32/launcher.py` (nessun argomento) -> mostra il menu OS
+  (griglia di icone, vedi `os_menu.py`), scopre le cartucce qui
+  dentro. Scelta una cartuccia, chiede la modalità: **Locale**,
+  **Ospita partita in rete** o **Unisciti a partita in rete** (fino a
+  8 giocatori, vedi `doc_networking.md`) - dopo la partita si torna al
+  menu, stesso indice di prima, finché non si chiude davvero la
+  finestra.
 - `python3 s32/launcher.py carts/nome_gioco/game.py` -> BYPASSA il
   menu, lancia direttamente quella cartuccia (stesso comportamento
-  diretto della v1: `python3 main.py`)
+  diretto della v1: `python3 main.py`). Aggiungendo
+  `--netplay-host <porta> <num_giocatori>` o `--netplay-join <ip>
+  <porta>` si salta anche il form del menu.
