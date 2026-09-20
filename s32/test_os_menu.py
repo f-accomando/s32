@@ -561,6 +561,51 @@ finally:
     _launcher_om.start_netcode_host = _orig_start_host_om
     _player_profile_om.PROFILE_PATH = _orig_profile_path_om
 
+# ---------------------------------------------------------------
+# Test 19: _after_match() - bug segnalato dall'utente ("se provo a
+# chiudere va in crash"): PRIMA si ridimensionava sempre la finestra
+# del menu, ANCHE quando l'utente aveva appena chiuso quella di gioco
+# (pygame.display.set_mode() su una finestra gia' chiusa - crash SDL
+# plausibile su alcune piattaforme). Ora l'ordine e': se si sta
+# chiudendo, pygame.quit() e basta, MAI un set_mode() dopo.
+# ---------------------------------------------------------------
+class _FakeNetSessionAm:
+    def __init__(self, fallisce_al_close=False):
+        self.closed = False
+        self.fallisce_al_close = fallisce_al_close
+    def close(self):
+        self.closed = True
+        if self.fallisce_al_close:
+            raise OSError("socket gia' chiuso")
+
+_pygame_om.quit.reset_mock()
+_pygame_om.display.set_mode.reset_mock()
+_sessione_am = _FakeNetSessionAm()
+_risultato_am = _os_menu_om._after_match(_pygame_om, (999, 888), True, _sessione_am)
+check("_after_match: chiusura finestra -> ritorna None (il chiamante deve fermarsi)", _risultato_am, None)
+check("_after_match: chiusura finestra -> pygame.quit() chiamato", _pygame_om.quit.called, True)
+check("_after_match: chiude SEMPRE la sessione di rete se presente", _sessione_am.closed, True)
+check("_after_match: chiusura finestra -> NESSUN set_mode() dopo (bug corretto)",
+      _pygame_om.display.set_mode.called, False)
+
+_pygame_om.quit.reset_mock()
+_pygame_om.display.set_mode.reset_mock()
+_sessione_am2 = _FakeNetSessionAm()
+_risultato_am2 = _os_menu_om._after_match(_pygame_om, (999, 888), False, _sessione_am2)
+check("_after_match: si torna al menu -> ritorna la nuova Surface (non None)", _risultato_am2 is None, False)
+check("_after_match: si torna al menu -> pygame.quit() NON chiamato", _pygame_om.quit.called, False)
+check("_after_match: si torna al menu -> ridimensiona DAVVERO la finestra del menu",
+      _pygame_om.display.set_mode.called, True)
+
+# una sessione che fallisce a chiudersi (socket gia' in errore) non
+# deve MAI impedire di tornare al menu o di chiudere il programma
+_sessione_am3 = _FakeNetSessionAm(fallisce_al_close=True)
+try:
+    _os_menu_om._after_match(_pygame_om, (999, 888), False, _sessione_am3)
+    check("_after_match: close() che fallisce (OSError) non blocca il ritorno al menu", "nessun errore", "nessun errore")
+except OSError:
+    check("_after_match: close() che fallisce (OSError) non blocca il ritorno al menu", "OSError propagato", "nessun errore")
+
 print()
 if fails == 0:
     print("Tutti i test passati.")

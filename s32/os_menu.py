@@ -182,6 +182,35 @@ def _draw_profile_screen(screen, pygame, fonts, nickname_field, avatar_index, av
     screen.blit(hint, (GRID_ORIGIN_X, WINDOW_H - 30))
 
 
+def _after_match(pygame, window_size, quit_requested, netcode_session=None):
+    """Da chiamare SUBITO dopo run_direct(), nei 4 punti che lanciano
+    una partita: gestisce la chiusura della sessione di rete e la
+    scelta chiudi-tutto/torna-al-menu in un solo posto.
+
+    ORDINE IMPORTANTE (bug trovato dall'utente: "se provo a chiudere
+    va in crash"): se l'utente ha chiuso la FINESTRA durante la
+    partita (quit_requested=True), pygame.quit() va chiamato SUBITO -
+    ridimensionare la finestra del menu (pygame.display.set_mode())
+    DOPO che l'utente l'ha gia' chiusa e' un'operazione su una
+    finestra che non esiste piu', un crash SDL plausibile su alcune
+    piattaforme. Prima veniva sempre ridimensionata PRIMA di
+    controllare quit_requested, anche quando si stava per chiudere.
+
+    Ritorna la nuova Surface del menu (gia' ridimensionata) se si
+    torna alla griglia, None se il chiamante deve fare return subito
+    (l'app si sta chiudendo)."""
+    if netcode_session is not None:
+        try:
+            netcode_session.close()
+        except OSError:
+            pass  # socket gia' in errore/chiuso - non deve mai
+                   # impedire di tornare al menu o di uscire
+    if quit_requested:
+        pygame.quit()
+        return None
+    return pygame.display.set_mode(window_size)
+
+
 def _entry_and_kind(cart):
     entry = cart.entry_py() or cart.entry_asm()
     kind = 'py' if cart.entry_py() else 'asm'
@@ -471,9 +500,8 @@ def run_os_menu():
         if action == 'launch_local':
             entry, kind = _entry_and_kind(chosen_cart)
             quit_requested = run_direct(entry, kind, quit_pygame_at_end=False)
-            screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
-            if quit_requested:
-                pygame.quit()
+            screen = _after_match(pygame, (WINDOW_W, WINDOW_H), quit_requested)
+            if screen is None:
                 return
             state = 'grid'
             continue
@@ -502,10 +530,8 @@ def run_os_menu():
             entry, kind = _entry_and_kind(chosen_cart)
             quit_requested = run_direct(entry, kind, quit_pygame_at_end=False,
                                          netcode_session=netcode_session, local_player_index=local_idx)
-            netcode_session.close()
-            screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
-            if quit_requested:
-                pygame.quit()
+            screen = _after_match(pygame, (WINDOW_W, WINDOW_H), quit_requested, netcode_session)
+            if screen is None:
                 return
             state = 'grid'
             continue
@@ -563,10 +589,8 @@ def run_os_menu():
             entry, kind = _entry_and_kind(chosen_cart)
             quit_requested = run_direct(entry, kind, quit_pygame_at_end=False,
                                          netcode_session=netcode_session, local_player_index=local_idx)
-            netcode_session.close()
-            screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
-            if quit_requested:
-                pygame.quit()
+            screen = _after_match(pygame, (WINDOW_W, WINDOW_H), quit_requested, netcode_session)
+            if screen is None:
                 return
             state = 'grid'
             continue
@@ -586,10 +610,8 @@ def run_os_menu():
             entry, kind = _entry_and_kind(chosen_cart)
             quit_requested = run_direct(entry, kind, quit_pygame_at_end=False,
                                          netcode_session=netcode_session, local_player_index=local_idx)
-            netcode_session.close()
-            screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
-            if quit_requested:
-                pygame.quit()
+            screen = _after_match(pygame, (WINDOW_W, WINDOW_H), quit_requested, netcode_session)
+            if screen is None:
                 return
             state = 'grid'
             continue

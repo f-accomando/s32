@@ -715,6 +715,37 @@ check("netcode: dopo il lag simulato, la sessione arriva a richiedere frame succ
       max(_sessione_netcode.richieste) > 0, True)
 
 # ---------------------------------------------------------------
+# Test 13bis: un errore di rete A META' PARTITA (non solo al momento
+# di connettersi, gia' gestito da os_menu.py) non deve crashare
+# l'intera applicazione - segnalato dall'utente giocando davvero tra
+# due reti diverse (casa/lavoro), molto piu' soggette a blip di rete
+# di una singola LAN locale. run_direct() deve tornare normalmente
+# (quit_requested=False, si torna al menu), non propagare l'OSError.
+# ---------------------------------------------------------------
+class _SessioneCheCadeAMetaPartita:
+    def __init__(self, fallisce_al_frame=3):
+        self.fallisce_al_frame = fallisce_al_frame
+        self.invii = 0
+    def submit_local_input(self, frame_number, input_byte):
+        self.invii += 1
+        if self.invii >= self.fallisce_al_frame:
+            raise OSError("Network is unreachable")
+    def get_frame_inputs(self, frame_number, timeout=0.25):
+        return (0, 0)  # mai raggiunto: submit_local_input fallisce prima
+
+_sessione_cade = _SessioneCheCadeAMetaPartita(fallisce_al_frame=3)
+_buf_crash = _io_net.StringIO()
+with _ctx_net.redirect_stdout(_buf_crash):
+    _quit_richiesto = launcher.run_direct(
+        os.path.join(os.path.dirname(__file__), '..', 'carts', 'adventure_asm', 'game.asm'), 'asm',
+        show_stats=False, quit_pygame_at_end=False, renderer_mode='dirty-rects',
+        playtest=True, playtest_quick=True,
+        netcode_session=_sessione_cade, local_player_index=0)
+
+check("un OSError a meta' partita NON crasha - run_direct() ritorna normalmente", _quit_richiesto, False)
+check("un OSError a meta' partita: il tentativo che fallisce viene registrato", _sessione_cade.invii >= 3, True)
+
+# ---------------------------------------------------------------
 # Test 14: start_netcode_host() annuncia sulla LAN (LanAnnouncer) per
 # tutta l'attesa - aggiunto dopo che l'utente ha chiesto "come faccio
 # a sapere l'IP dell'host per unirmi?": la risposta e' che l'host lo

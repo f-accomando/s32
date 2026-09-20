@@ -77,6 +77,33 @@ vedi sotto). La causa di rete vera e propria resta un sospetto, non
 ancora verificabile da qui (nessun laboratorio a due macchine
 disponibile in questo ambiente di sviluppo).
 
+**Aggiornamento da un secondo test (PC "casa" + PC "lavoro")**:
+l'utente ha ripetuto il test con un PC di casa e uno di lavoro. Se
+"casa" e "lavoro" sono davvero due reti separate (non un'unica LAN
+raggiunta ad es. via VPN aziendale che le rende un'unica rete
+locale), questo cambia il sospetto principale:
+- La **scoperta via broadcast** (`LanAnnouncer`/`LanBrowser`, UDP su
+  `<broadcast>`) funziona SOLO dentro una singola rete locale - un
+  pacchetto broadcast non attraversa mai un router verso Internet.
+  Se le due macchine sono su reti diverse, la scoperta reciproca non
+  può funzionare per definizione, indipendentemente da firewall o VPN:
+  non è un bug, è un limite fisico del broadcast UDP. Il fatto che in
+  un verso la scoperta abbia comunque funzionato suggerisce che le
+  due macchine SIANO sulla stessa LAN (es. entrambe dietro la stessa
+  VPN aziendale) - nel qual caso restano validi i sospetti sotto - ma
+  va verificato con `ipconfig`/`ifconfig` su entrambe le macchine.
+- Il **timeout dopo pochi secondi** in questo scenario è coerente con
+  un problema di **NAT/port-forwarding**: una rete "casa" tipica sta
+  dietro un router NAT che, senza una regola di forwarding esplicita
+  sulla porta di gioco (42420 di default), rifiuta le connessioni in
+  ingresso da fuori la propria rete locale. Se l'host è il PC di casa,
+  il PC di lavoro può anche vedere l'annuncio (se le reti sono unite
+  da una VPN che porta anche il traffico broadcast) ma non riuscire
+  MAI a stabilire la connessione di gioco vera, perché il router di
+  casa non inoltra quella porta verso il PC host. Questo richiede
+  configurare il port-forwarding sul router di casa (o giocare sulla
+  stessa LAN fisica), non è correggibile lato codice.
+
 **Bug di UI corretto**: `_draw_list_screen` (schermata `join_pick`,
 la lista degli host trovati) non disegnava mai `error_message` - un
 fallimento di connessione tornava alla lista IN SILENZIO, sembrando
@@ -117,6 +144,63 @@ serve farlo a mano su hardware vero):
    form manuale con l'IP reale dell'host sulla LAN (non `127.0.0.1`,
    valido solo per la stessa macchina) - bypassa la scoperta ma non
    il firewall sulla porta di gioco.
+
+---
+
+## 2ter. Crash risolto: chiusura della finestra e disconnessione a metà partita
+
+Stesso report dell'utente del test a due PC includeva anche: *"se
+lasciato aperto a lungo o se provo a chiudere va in crash
+l'applicazione"*. A differenza dei problemi di rete in 2bis, qui la
+causa era nel codice ed è stata trovata e corretta (con test).
+
+**Causa 1 - ordine sbagliato tra "torno al menu" e "ho chiuso la
+finestra"**: alla fine di ogni partita (locale, host o client),
+`os_menu.py` ridimensionava SEMPRE la finestra per tornare a
+disegnare il menu (`pygame.display.set_mode(...)`) PRIMA di
+controllare se l'utente aveva invece chiuso la finestra di gioco
+(`quit_requested=True`, dalla `X` della finestra). Chiamare
+`set_mode()` su una finestra che l'utente ha già chiuso è
+un'operazione su una risorsa non più valida - un crash SDL plausibile
+su alcune piattaforme, ed è esattamente lo scenario "provo a
+chiudere" riportato. I 4 punti che lanciano una partita (locale,
+ospita, unisciti via scoperta, unisciti manuale) duplicavano ognuno
+questa logica, ognuno con lo stesso bug. Corretto accorpando la
+logica in un solo punto, `_after_match()` in `os_menu.py`: controlla
+`quit_requested` PRIMA di ogni altra cosa, e in tal caso chiama
+`pygame.quit()` e basta, senza mai più toccare la finestra. La
+chiusura della sessione di rete (se presente) è anch'essa in questo
+unico posto, avvolta in un `try/except OSError` - un socket già in
+errore a fine partita non deve mai impedire di tornare al menu o di
+uscire dal programma.
+
+**Causa 2 - un errore di rete A META' PARTITA non veniva mai
+catturato**: `netcode_session.submit_local_input()` e
+`.get_frame_inputs()` (in `launcher.py`, dentro il game loop) possono
+sollevare `OSError`/`socket.gaierror` in qualsiasi momento, non solo
+al momento di connettersi (quello era già gestito da `os_menu.py`
+prima di questa modifica). Una rete che cade a metà partita (molto
+più frequente giocando tra due reti reali diverse, come nel test
+casa/lavoro dell'utente, che tra due macchine sulla stessa LAN) faceva
+quindi crashare l'intera applicazione con un traceback grezzo, con
+NESSUN punto della catena di chiamate che la catturasse. Corretto
+avvolgendo lo scambio di input di rete in `_run_pygame_loop` con un
+`try/except OSError`: un fallimento di rete a metà partita viene ora
+trattato come se l'utente avesse premuto ESC - si torna al menu (via
+`_after_match()`, causa 1) invece di chiudere tutto. Approfittando
+della modifica, corretto anche un `clock.tick(60)` mancante sul ramo
+che salta un frame in attesa dell'input remoto (limitatore di
+framerate comunque da rispettare anche quando il frame viene
+scartato).
+
+**Test aggiunti**: `test_os_menu.py` (`_after_match()`: ritorna `None`
++ chiama `pygame.quit()` alla chiusura finestra SENZA mai chiamare
+`set_mode()` dopo; ritorna la nuova `Surface` quando si torna al
+menu; una sessione che fallisce a chiudersi non blocca nulla) e
+`test_launcher.py` (Test 13bis: una sessione di rete che solleva
+`OSError` al terzo invio di input durante una partita vera
+(`adventure_asm`, playtest) non fa crashare `run_direct()`, che torna
+normalmente con `quit_requested=False`).
 
 ---
 
