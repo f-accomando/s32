@@ -603,9 +603,25 @@ class GpuRenderer:
         # -- composizione: sempre l'intero frame, ogni frame. Con la
         # GPU a ~2ms per un frame pieno (misurato, vedi test_launcher.py),
         # tracciare "dirty rect" per gli sprite non vale piu' la
-        # complessita' che costava su Surface software --
+        # complessita' che costava su Surface software.
+        #
+        # QUI SOTTO ERA UN SOLO 'draw_sprites' che includeva clear() +
+        # il draw dello SFONDO INTERO (480x320, non un piccolo tile
+        # 32x32!) + il loop degli sprite - un'etichetta fuorviante
+        # trovata analizzando issue #24 (draw_sprites misurato a
+        # ~12-14ms su Pi 1 reale): un benchmark isolato di soli draw()
+        # 32x32 (bench_gpu_draw.py) costava una FRAZIONE di quel
+        # tempo, mostrando che il vero sospettato non erano gli sprite
+        # (solo 3-7 per frame durante lo scroll) ma quasi certamente
+        # il draw() dello sfondo a schermo intero, nascosto dentro la
+        # stessa etichetta. Separato in tre timing distinti apposta -
+        # senza questo dettaglio non si può distinguere "il problema è
+        # lo sfondo" da "il problema sono gli sprite". --
+        t4b = time.perf_counter()
         self.renderer.clear()
+        t4c = time.perf_counter()
         self.bg_texture.draw(dstrect=(0, 0, SCREEN_W_PX, SCREEN_H_PX))
+        t4d = time.perf_counter()
         for tile_index, palette, x, y in iter_visible_sprite_tiles(oam):
             srcrect = self._sprite_tile_srcrect(vram, cgram, tile_index, palette)
             self.sprite_atlas_texture.draw(srcrect=srcrect, dstrect=(x, y, TILE_SIZE_PX, TILE_SIZE_PX))
@@ -613,7 +629,9 @@ class GpuRenderer:
         self.renderer.present()
         t7 = time.perf_counter()
         if self.last_timing is not None:
-            self.last_timing['draw_sprites'] = t6 - t4
+            self.last_timing['clear'] = t4c - t4b
+            self.last_timing['bg_draw'] = t4d - t4c
+            self.last_timing['sprite_draws'] = t6 - t4d
             self.last_timing['present'] = t7 - t6
 
 
@@ -1281,7 +1299,8 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
                                   'scroll_strip_surface', 'scroll_strip_blit',
                                   'scroll_screen_blit', 'scroll_flip',
                                   'scroll_texture_update', 'scroll_gpu_shift',
-                                  'scroll_draw_sprites', 'scroll_present')
+                                  'scroll_clear', 'scroll_bg_draw', 'scroll_sprite_draws',
+                                  'scroll_present')
                         if k in stats
                     )
                     print(f"  [dettaglio scroll, {sn} frame in scroll] {parts}")
@@ -1337,7 +1356,8 @@ def _print_playtest_summary(phase_stats, renderer_mode, wall_seconds):
                           'scroll_strip_surface', 'scroll_strip_blit',
                           'scroll_screen_blit', 'scroll_flip',
                           'scroll_texture_update', 'scroll_gpu_shift',
-                          'scroll_draw_sprites', 'scroll_present')
+                          'scroll_clear', 'scroll_bg_draw', 'scroll_sprite_draws',
+                          'scroll_present')
                 if k in ps
             )
             print(f"  -> dettaglio scroll ({sn} frame in scroll): {parts}")
