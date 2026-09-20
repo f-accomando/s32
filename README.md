@@ -1878,3 +1878,38 @@ piu' costosa, e' probabilmente la spiegazione dell'intero divario
 rimasto - altrimenti bisognera' guardare oltre (es. con un profiler
 vero sulla Pi, `perf`/`vcgencmd`, non piu' indovinando variabili una
 alla volta).
+
+## Quinto giro: anche la visibilita' della finestra esclusa - ultima ipotesi, il "pacing" tra un frame e l'altro
+
+L'utente ha rilanciato `bench_gpu_draw.py` sulla Pi 1 vera con
+schermo collegato: finestra nascosta e finestra visibile differiscono
+solo dell'1% (dentro il rumore) - **anche questa causa e' esclusa**.
+Sei ipotesi ormai smentite in cinque giri di dati reali (area, alpha,
+cache, sfondo, atlas/srcrect, visibilita' finestra), e il benchmark
+isolato resta sempre intorno a ~2ms per "sfondo+7 sprite" contro i
+~12.5ms del gioco vero.
+
+**Ultima differenza strutturale rimasta**: nel benchmark
+`clear()+draw()+present()` si susseguono in un ciclo STRETTO,
+migliaia di volte di fila senza mai fermarsi. Nel gioco vero, tra la
+fine di un frame e l'inizio del successivo, ci sono SEMPRE ~22-28ms
+di emulazione CPU (`cpu.run()`) prima di richiamare
+`renderer.clear()`. Se la GPU esegue i comandi in modo asincrono
+rispetto alla CPU (`draw()`/`present()` accodano lavoro, la GPU lo
+consuma per conto suo), un ciclo stretto senza pause puo' accumulare
+una coda che NASCONDE il vero costo di sincronizzazione - la CPU non
+aspetta mai che la GPU abbia davvero finito, perche' c'e' sempre
+altro lavoro gia' in coda. La pausa di ~25ms del gioco vero, invece,
+lascia che la coda si svuoti COMPLETAMENTE ad ogni frame, costringendo
+la chiamata successiva ad aspettare per davvero che l'hardware sia
+pronto.
+
+`bench_gpu_draw.py` ora confronta direttamente la stessa sequenza con
+e senza una pausa di ~25ms tra un'iterazione e l'altra (simulando il
+gap di `cpu.run()` del gioco vero, misurato FUORI dalla regione
+cronometrata - si misura solo il costo di clear+draw+present, non la
+sleep() stessa). Se il costo per-frame sale avvicinandosi ai
+12-14ms osservati nel gioco vero, questa e' la spiegazione cercata da
+cinque giri di misure; altrimenti serve un profiler vero sulla Pi
+(`perf`, `vcgencmd`) invece di continuare a indovinare variabili una
+alla volta.

@@ -54,6 +54,25 @@ per rispondere a tre domande concrete:
      stessa identica sequenza "sfondo+7 sprite" su DUE finestre,
      nascosta e visibile, una dopo l'altra nella stessa esecuzione,
      per un confronto diretto A/B.
+  8. NUOVO - anche la visibilita' della finestra e' ESCLUSA da un
+     quinto giro di dati reali (+1%, dentro il rumore). SEI ipotesi
+     ormai smentite. L'ultima differenza strutturale rimasta tra
+     questo script e il gioco vero: qui clear()+draw()+present() si
+     susseguono in un ciclo STRETTO, migliaia di volte di fila, senza
+     mai fermarsi - nel gioco vero, tra la fine di un frame e l'inizio
+     del successivo, ci sono SEMPRE ~22-28ms di emulazione CPU
+     (cpu.run()) prima di richiamare renderer.clear(). Se la GPU
+     esegue i comandi in modo asincrono rispetto alla CPU (tipico:
+     draw()/present() accodano lavoro, la GPU lo consuma per conto
+     suo), un ciclo stretto puo' accumulare una coda che NASCONDE il
+     vero costo di sincronizzazione (la CPU non aspetta mai che la GPU
+     abbia davvero finito, perche' c'e' sempre altro lavoro in coda) -
+     mentre la pausa di ~25ms nel gioco vero lascia che la coda si
+     svuoti COMPLETAMENTE, costringendo la chiamata successiva ad
+     aspettare per davvero che l'hardware sia pronto. Questa funzione
+     ripete la sequenza "sfondo+7 sprite" con e senza una pausa di
+     ~25ms tra un'iterazione e l'altra (che simula il gap di cpu.run()
+     del gioco vero), per un confronto diretto.
 
 Uso: python3 bench_gpu_draw.py  (lanciarlo SULLA Pi 1 vera, CON UNO
 SCHERMO COLLEGATO - il test 7 apre una finestra visibile per qualche
@@ -322,6 +341,72 @@ def confronto_visibilita():
     print("Incolla ANCHE questa sezione per l'analisi.")
 
 
+def _misura_con_pausa(pausa_s, n_iter):
+    """Come _misura_visibilita(), ma qui il punto e' il TEMPO TRA
+    un'iterazione e l'altra, non la visibilita' - vedi domanda 8 nel
+    docstring del modulo. La pausa (se > 0) sta FUORI dalla regione
+    cronometrata, cosi' si misura solo il costo di clear+draw+present,
+    non la sleep() stessa."""
+    win = video.Window("bench_gpu_draw (pacing)", size=(480, 320), hidden=False)
+    renderer = video.Renderer(win, accelerated=1, vsync=False)
+
+    bg_surf = pygame.Surface((480, 320))
+    for y in range(0, 320, 32):
+        for x in range(0, 480, 32):
+            colore = (120, 90, 40) if (x // 32 + y // 32) % 2 == 0 else (140, 100, 50)
+            bg_surf.fill(colore, rect=(x, y, 32, 32))
+    bg_tex = video.Texture(renderer, (480, 320), target=True)
+    bg_tex.update(bg_surf)
+
+    tile_surf = pygame.Surface((32, 32), pygame.SRCALPHA)
+    tile_surf.fill((200, 80, 40, 255))
+    tile_tex = video.Texture.from_surface(renderer, tile_surf)
+
+    def _frame():
+        renderer.clear()
+        bg_tex.draw(dstrect=(0, 0, 480, 320))
+        for i in range(7):
+            tile_tex.draw(dstrect=(i * 32, 0, 32, 32))
+        renderer.present()
+
+    for _ in range(5):  # warm-up, stessa pausa del giro vero
+        _frame()
+        if pausa_s:
+            time.sleep(pausa_s)
+
+    tempi_ms = []
+    for _ in range(n_iter):
+        t0 = time.perf_counter()
+        _frame()
+        t1 = time.perf_counter()
+        tempi_ms.append((t1 - t0) * 1000)
+        if pausa_s:
+            time.sleep(pausa_s)
+
+    win.destroy()
+    return sum(tempi_ms) / len(tempi_ms)
+
+
+def confronto_pacing():
+    print()
+    print("=== DOMANDA 8: una pausa tra un frame e l'altro (come cpu.run() nel gioco vero) cambia il costo? ===")
+    ms_stretto = _misura_con_pausa(pausa_s=0, n_iter=200)
+    ms_con_pausa = _misura_con_pausa(pausa_s=0.025, n_iter=80)  # ~25ms, come cpu ms nel gioco vero
+    print(f"ciclo STRETTO (nessuna pausa, come tutti i test sopra): {ms_stretto:.3f} ms/iterazione")
+    print(f"ciclo CON PAUSA ~25ms tra un frame e l'altro (come il gioco vero): {ms_con_pausa:.3f} ms/iterazione")
+    diff = ms_con_pausa - ms_stretto
+    pct = (diff / ms_stretto * 100) if ms_stretto else 0
+    print(f"differenza: {diff:+.3f} ms ({pct:+.0f}%)")
+    if diff > 3.0:
+        print("-> LA PAUSA CONTA ECCOME: coerente con un costo di sincronizzazione GPU normalmente nascosto da "
+              "un ciclo stretto senza pause (una coda di comandi che non si svuota mai) - quando la coda si svuota "
+              "come nel gioco vero, il costo per frame si avvicina molto di piu' ai 12-14ms osservati.")
+    else:
+        print("-> Nessuna differenza significativa: la pausa tra i frame non spiega il divario.")
+    print()
+    print("Incolla ANCHE questa sezione per l'analisi.")
+
+
 if __name__ == "__main__":
     if not hasattr(video, "Renderer"):
         print("pygame._sdl2.video.Renderer non disponibile - serve pygame-ce o pygame >= 2.1 con supporto GPU")
@@ -329,4 +414,5 @@ if __name__ == "__main__":
     main()
     pygame.init()
     confronto_visibilita()
+    confronto_pacing()
     pygame.quit()
