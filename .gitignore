@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+
+# profilo locale del giocatore (nickname/avatar) - stato personale
+# della macchina, non del progetto, vedi s32/player_profile.py
+s32/player_profile.json

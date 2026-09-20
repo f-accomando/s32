@@ -198,6 +198,7 @@ class _FakeSurfaceOm:
     def blit(self, *a, **k): pass
     def get_rect(self, *a, **k): return (0, 0, 10, 10)
     def get_width(self): return 40
+    def get_height(self): return 16
 
 class _FakeFontOm:
     def render(self, text, aa, color):
@@ -217,7 +218,7 @@ _pygame_om.QUIT = 1
 _pygame_om.KEYDOWN = 2
 for _i, _name in enumerate(['K_ESCAPE', 'K_UP', 'K_DOWN', 'K_LEFT', 'K_RIGHT',
                              'K_w', 'K_a', 'K_s', 'K_d', 'K_RETURN', 'K_j',
-                             'K_SPACE', 'K_TAB', 'K_BACKSPACE'], start=10):
+                             'K_SPACE', 'K_TAB', 'K_BACKSPACE', 'K_p'], start=10):
     setattr(_pygame_om, _name, _i)
 
 _pygame_om.init = _MagicMock_om()
@@ -266,6 +267,14 @@ _fake_carts_om = [FakeMenuCart('aaa'), FakeMenuCart('bbb')]
 import os_menu as _os_menu_om
 _importlib_om.reload(_os_menu_om)
 _os_menu_om.discover_carts = lambda carts_dir: _fake_carts_om
+
+# isola il profilo (nickname/avatar) su un file temporaneo - i test
+# NON devono mai leggere/scrivere il vero player_profile.json di chi
+# esegue la suite
+import player_profile as _player_profile_om
+_orig_profile_path_om = _player_profile_om.PROFILE_PATH
+_player_profile_om.PROFILE_PATH = os.path.join(
+    tempfile.mkdtemp(prefix='s32_om_profile_test_'), 'player_profile.json')
 
 _run_direct_calls = []
 _run_direct_returns = []
@@ -331,8 +340,8 @@ class _FakeNetSession:
 _host_calls = []
 _fake_session_om = _FakeNetSession()
 
-def _fake_start_netcode_host(port, num_players):
-    _host_calls.append((port, num_players))
+def _fake_start_netcode_host(port, num_players, host_name='S32', avatar=0):
+    _host_calls.append((port, num_players, host_name, avatar))
     return _fake_session_om, 0
 
 _pygame_om.quit.reset_mock()
@@ -353,7 +362,7 @@ try:
     _os_menu_om.run_os_menu()
 
     check("run_os_menu 'Ospita': start_netcode_host chiamato con i valori di default del form",
-          _host_calls, [(42420, 2)])
+          _host_calls, [(42420, 2, 'Player', 0)])
     check("run_os_menu 'Ospita': run_direct riceve la sessione di rete creata",
           _run_direct_calls[0][2] is _fake_session_om, True)
     check("run_os_menu 'Ospita': la sessione viene chiusa dopo la partita", _fake_session_om.closed, True)
@@ -483,6 +492,74 @@ _errore_valore = ValueError("num_players deve essere tra 2 e 8, ricevuto 99")
 _msg_valore = _os_menu_om._friendly_netcode_error(_errore_valore, 42420)
 check("_friendly_netcode_error: ValueError -> messaggio invariato (non e' un problema di rete)",
       _msg_valore, str(_errore_valore))
+
+# ---------------------------------------------------------------
+# Test 18: profilo (nickname + avatar, tasto P dalla griglia) - vedi
+# player_profile.py. Cambiare nickname/avatar e salvare (invio) deve
+# farli usare DAVVERO da "Ospita partita" (host_name/avatar passati a
+# start_netcode_host) - e persistere su disco.
+# ---------------------------------------------------------------
+_host_calls.clear()
+_pygame_om.quit.reset_mock()
+_run_direct_calls.clear()
+_launcher_om.run_direct = _fake_run_direct
+_launcher_om.start_netcode_host = _fake_start_netcode_host
+try:
+    _eventi_in_coda.extend([
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_p)],                     # grid: apre 'profile' (nickname precompilato: 'Player')
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_BACKSPACE)],             # cancella 'Player' (6 backspace)
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_BACKSPACE)],
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_BACKSPACE)],
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_BACKSPACE)],
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_BACKSPACE)],
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_BACKSPACE)],
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=999, unicode='Z')],                  # digita il nickname "Zed"
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=999, unicode='e')],
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=999, unicode='d')],
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RIGHT)],                 # avatar: 0 -> 1
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RIGHT)],                 # avatar: 1 -> 2
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RETURN)],               # salva -> torna a 'grid'
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RETURN)],               # grid: scegli "aaa" -> 'mode'
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_DOWN)],                  # mode: -> "Ospita partita in rete"
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RETURN)],               # mode: conferma -> 'host'
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_RETURN)],               # host: conferma con i default
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_ESCAPE)],               # torna al menu poi esci
+    ])
+    _run_direct_returns.append(False)
+
+    _os_menu_om.run_os_menu()
+
+    check("profilo: il nickname digitato e l'avatar scelto vengono passati a start_netcode_host",
+          _host_calls, [(42420, 2, 'Zed', 2)])
+    check("profilo: il salvataggio persiste su disco (player_profile.json)",
+          _player_profile_om.load_profile(), {'nickname': 'Zed', 'avatar': 2})
+finally:
+    _launcher_om.run_direct = _orig_run_direct_om
+    _launcher_om.start_netcode_host = _orig_start_host_om
+
+# ESC dalla schermata 'profile' annulla SENZA salvare - il profilo
+# resta quello di prima ('Zed'/2 dal test sopra)
+_host_calls.clear()
+_pygame_om.quit.reset_mock()
+_run_direct_calls.clear()
+_launcher_om.run_direct = _fake_run_direct
+_launcher_om.start_netcode_host = _fake_start_netcode_host
+try:
+    _eventi_in_coda.extend([
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_p)],                     # grid: apre 'profile'
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=999, unicode='X')],                  # digita qualcosa...
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_ESCAPE)],               # ...ma annulla senza salvare
+        [_FakeEventOm(_pygame_om.KEYDOWN, key=_pygame_om.K_ESCAPE)],               # esci dal menu
+    ])
+
+    _os_menu_om.run_os_menu()
+
+    check("profilo: ESC annulla senza salvare - il profilo resta invariato",
+          _player_profile_om.load_profile(), {'nickname': 'Zed', 'avatar': 2})
+finally:
+    _launcher_om.run_direct = _orig_run_direct_om
+    _launcher_om.start_netcode_host = _orig_start_host_om
+    _player_profile_om.PROFILE_PATH = _orig_profile_path_om
 
 print()
 if fails == 0:

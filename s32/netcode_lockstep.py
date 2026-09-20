@@ -273,11 +273,17 @@ class LockstepClient(_UdpEndpoint):
 
 class LanAnnouncer:
     """Da far girare lato host: annuncia periodicamente la partita
-    in broadcast sulla rete locale."""
+    in broadcast sulla rete locale.
 
-    def __init__(self, game_name, connect_port=DEFAULT_PORT):
+    avatar: indice dell'avatar del profilo locale dell'host (vedi
+    profile.py/os_menu.py) - facoltativo, di default 0. Incluso
+    nell'annuncio cosi' chi cerca partite (LanBrowser.scan()) vede
+    l'avatar dell'host PRIMA di connettersi, non solo il nome."""
+
+    def __init__(self, game_name, connect_port=DEFAULT_PORT, avatar=0):
         self.game_name = game_name
         self.connect_port = connect_port
+        self.avatar = avatar
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self._running = False
@@ -293,6 +299,7 @@ class LanAnnouncer:
             'type': 'announce',
             'name': self.game_name,
             'port': self.connect_port,
+            'avatar': self.avatar,
         }).encode('utf-8')
         while self._running:
             try:
@@ -333,6 +340,7 @@ class LanBrowser:
                     'ip': addr[0],
                     'name': msg.get('name', '?'),
                     'port': msg.get('port', DEFAULT_PORT),
+                    'avatar': msg.get('avatar', 0),
                 }
         return list(found.values())
 
