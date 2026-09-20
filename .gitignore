@@ -1,1 +1,4 @@
 *.pyc
+*.pyc
+s32/__pycache__/launcher.cpython-314.pyc
+s32/__pycache__/os_menu.cpython-314.pyc
