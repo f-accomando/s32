@@ -437,6 +437,53 @@ finally:
     _launcher_om.discover_netcode_hosts = _orig_discover_om
     _launcher_om.start_netcode_client = _orig_start_client_om
 
+# ---------------------------------------------------------------
+# Test 16: bug segnalato dall'utente testando su due PC reali - un
+# host trovato dalla scoperta LAN ma con la connessione VERA che poi
+# fallisce (timeout) tornava alla schermata 'join_pick' SENZA
+# mostrare alcun errore ("sembra tornare indietro senza motivo").
+# Causa: _draw_list_screen non accettava/disegnava error_message.
+# ---------------------------------------------------------------
+_rendered_texts = []
+
+class _SpyFontOm:
+    def render(self, text, aa, color):
+        _rendered_texts.append(text)
+        return _FakeSurfaceOm()
+
+_spy_list_menu_om = _os_menu_om.MenuState(['Host A (1.2.3.4:42420)', 'Inserisci IP manualmente...'])
+
+_rendered_texts.clear()
+_os_menu_om._draw_list_screen(_FakeSurfaceOm(), _SpyFontOm(), _SpyFontOm(), "Partite trovate:",
+                               _spy_list_menu_om, font_small=_SpyFontOm(),
+                               error_message="Timeout - controlla il firewall")
+check("_draw_list_screen: mostra l'error_message quando presente (bug corretto)",
+      any("Timeout" in t for t in _rendered_texts), True)
+
+_rendered_texts.clear()
+_os_menu_om._draw_list_screen(_FakeSurfaceOm(), _SpyFontOm(), _SpyFontOm(), "Partite trovate:",
+                               _spy_list_menu_om, font_small=_SpyFontOm(), error_message=None)
+check("_draw_list_screen: senza errore, nessun testo extra disegnato",
+      len(_rendered_texts), 1 + len(_spy_list_menu_om.items))
+
+# ---------------------------------------------------------------
+# Test 17: _friendly_netcode_error - un timeout/errore di rete
+# suggerisce di controllare il firewall (causa piu' comune sul
+# campo), un errore di validazione (ValueError, es. range non
+# valido) resta invariato - non e' un problema di rete
+# ---------------------------------------------------------------
+_errore_timeout = TimeoutError("Timeout connessione a ('192.168.1.50', 42420)")
+_msg_timeout = _os_menu_om._friendly_netcode_error(_errore_timeout, 42420)
+check("_friendly_netcode_error: TimeoutError -> suggerisce il firewall",
+      "firewall" in _msg_timeout.lower(), True)
+check("_friendly_netcode_error: TimeoutError -> menziona la porta giusta",
+      "42420" in _msg_timeout, True)
+
+_errore_valore = ValueError("num_players deve essere tra 2 e 8, ricevuto 99")
+_msg_valore = _os_menu_om._friendly_netcode_error(_errore_valore, 42420)
+check("_friendly_netcode_error: ValueError -> messaggio invariato (non e' un problema di rete)",
+      _msg_valore, str(_errore_valore))
+
 print()
 if fails == 0:
     print("Tutti i test passati.")
