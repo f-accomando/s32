@@ -1913,3 +1913,58 @@ sleep() stessa). Se il costo per-frame sale avvicinandosi ai
 cinque giri di misure; altrimenti serve un profiler vero sulla Pi
 (`perf`, `vcgencmd`) invece di continuare a indovinare variabili una
 alla volta.
+
+**Aggiornamento**: anche la pausa tra i frame e' stata esclusa
+sull'hardware reale (ciclo stretto 2.560ms contro ciclo con pausa
+2.106ms - addirittura PIU' veloce con la pausa, non piu' lento).
+Sette ipotesi ormai smentite in sei giri di misure reali (area,
+alpha, cache, sfondo, atlas/srcrect, visibilita' finestra, pacing) -
+il divario tra benchmark isolato e gioco vero resta senza una causa
+identificata lato codice GPU. A questo punto l'indagine su
+`draw_sprites`/`sprite_draws` e' in pausa: serve un profiler vero
+sulla Pi (`perf`, `vcgencmd`) per fare altri progressi, non ha piu'
+senso continuare a testare variabili di rendering una alla volta.
+L'utente ha spostato l'attenzione sulla CPU (vedi sotto).
+
+## Si passa alla CPU: PyPy verificato, ma il JIT ha bisogno di riscaldarsi
+
+Riprendendo l'issue #21 (il venv PyPy non era mai stato davvero
+attivo): diagnosticato e risolto passo passo sulla Pi 1 reale.
+
+**Causa**: il venv `~/aaa-env` era stato creato con `python3 -m venv`
+(CPython) invece di `pypy3 -m venv` (confermato leggendo
+`pyvenv.cfg`: `executable = /usr/bin/python3.13`). Ricreato con
+`pypy3 -m venv ~/aaa-env` - fallito la prima volta perche' mancava il
+pacchetto `pypy3-venv` (necessario per `ensurepip` sotto PyPy su
+Raspberry Pi OS), poi riuscito dopo `apt-get install pypy3-venv`.
+Verificato: `python3 --version` dentro il venv attivato mostra ora
+`[PyPy 7.3.19 with GCC 14.2.0]`.
+
+**Scoperta utile**: `--benchmark` (usato per isolare `cpu.run()` da
+tutto il resto) non importa MAI pygame - quindi non serve installare
+pygame nel venv PyPy per questo test specifico (evitando una
+compilazione da sorgente potenzialmente lunga/fragile su ARMv6).
+Serve pero' ancora Pillow (`pip install Pillow`, ~1 minuto per
+compilare la ruota su PyPy/ARMv6): `spritesheet_tool.py` fa `from PIL
+import Image` a livello di modulo, quindi qualunque cartuccia che
+importi (anche indirettamente, per il font condiviso) `graphics.py`
+ne ha bisogno solo per essere importata, anche se le funzioni
+effettivamente chiamate a runtime non toccano mai PIL.
+
+**Primo confronto, fuorviante**: con `--benchmark` (120 frame,
+default) PyPy risultava PIU' LENTO di CPython sullo stesso identico
+benchmark - `cpu.run(): 2.33ms/frame` con PyPy contro `0.48ms/frame`
+con CPython. Causa: il JIT di PyPy compila un ciclo caldo in codice
+nativo solo dopo averlo visto girare abbastanza volte - con soli 120
+frame (un paio di secondi di gioco vero) il costo di questo
+"riscaldamento" non fa in tempo ad ammortizzarsi, e si misura quasi
+solo l'interprete di PyPy (piu' lento di quello di CPython per il
+codice "freddo").
+
+**Fix**: aggiunto il flag `--benchmark-frames <N>` (default 120, come
+prima) per allungare il benchmark e dare al JIT il tempo di scaldarsi
+- avvicinandosi al caso reale di una partita giocata per minuti, non
+per 2 secondi. 6 nuovi test in `test_launcher.py` per il parsing del
+flag (numero valido, mancante, non numerico, non positivo). Prossimo
+passo: rilanciare il benchmark con molti piu' frame, sia con PyPy che
+con CPython, per un confronto equo.

@@ -153,7 +153,7 @@ import io
 import contextlib
 
 rest1, flags1 = parse_flags(['launcher.py', 'gioco.py'])
-check("nessun flag: dict tutto False (renderer='dirty-rects', ora default)", flags1, {'stats': False, 'benchmark': False, 'profile': False, 'renderer': 'dirty-rects', 'fullscreen': False, 'audio': True, 'playtest': False, 'playtest_quick': False, 'netplay_host_port': None, 'netplay_host_players': None, 'netplay_join_addr': None})
+check("nessun flag: dict tutto False (renderer='dirty-rects', ora default)", flags1, {'stats': False, 'benchmark': False, 'benchmark_frames': None, 'profile': False, 'renderer': 'dirty-rects', 'fullscreen': False, 'audio': True, 'playtest': False, 'playtest_quick': False, 'netplay_host_port': None, 'netplay_host_players': None, 'netplay_join_addr': None})
 check("nessun flag: argv invariato", rest1, ['launcher.py', 'gioco.py'])
 
 rest2, flags2 = parse_flags(['launcher.py', 'gioco.py', '--stats'])
@@ -166,6 +166,38 @@ check("--benchmark: rimosso, resta solo il file", rest3, ['launcher.py', 'gioco.
 
 rest4, flags4 = parse_flags(['launcher.py', 'gioco.py', '--stats', '--benchmark'])
 check("entrambi i flag insieme", flags4['stats'] and flags4['benchmark'], True)
+
+# --benchmark-frames <N>: quanti frame misura --benchmark (default
+# 120, vedi run_benchmark) - aggiunto dopo che l'utente ha trovato,
+# testando davvero su Pi 1, che con soli 120 frame il JIT di PyPy
+# risultava PIU' LENTO di CPython sullo stesso benchmark (il JIT non
+# fa in tempo a "scaldarsi" su un ciclo cosi' breve) - serve poter
+# allungare il benchmark per un confronto equo
+rest4n, flags4n = parse_flags(['launcher.py', 'gioco.py', '--benchmark', '--benchmark-frames', '5000'])
+check("--benchmark-frames: numero interpretato correttamente", flags4n['benchmark_frames'], 5000)
+check("--benchmark-frames: consuma il suo argomento, non lo lascia in argv", rest4n, ['launcher.py', 'gioco.py'])
+
+rest4o, flags4o = parse_flags(['launcher.py', 'gioco.py', '--benchmark'])
+check("--benchmark senza --benchmark-frames: resta None (run_benchmark usa il suo default)",
+      flags4o['benchmark_frames'], None)
+
+try:
+    parse_flags(['launcher.py', 'gioco.py', '--benchmark-frames'])
+    check("--benchmark-frames senza argomento: doveva sollevare LauncherError", False, True)
+except LauncherError:
+    check("--benchmark-frames senza argomento: solleva LauncherError come atteso", True, True)
+
+try:
+    parse_flags(['launcher.py', 'gioco.py', '--benchmark-frames', 'abc'])
+    check("--benchmark-frames non numerico: doveva sollevare LauncherError", False, True)
+except LauncherError:
+    check("--benchmark-frames non numerico: solleva LauncherError come atteso", True, True)
+
+try:
+    parse_flags(['launcher.py', 'gioco.py', '--benchmark-frames', '0'])
+    check("--benchmark-frames a 0: doveva sollevare LauncherError", False, True)
+except LauncherError:
+    check("--benchmark-frames a 0 (non positivo): solleva LauncherError come atteso", True, True)
 
 rest4b, flags4b = parse_flags(['launcher.py', 'gioco.py', '--profile'])
 check("--profile: rilevato", flags4b['profile'], True)
