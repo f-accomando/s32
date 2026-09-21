@@ -32,6 +32,17 @@ di comportamento "impossibile" durante lo sviluppo di cpu.py, la
 prima cosa da controllare e' se esiste un .so compilato in questa
 cartella (`ls s32/cpu*.so`) - se si', ricompilare o cancellarlo.
 
+SU RASPBERRY PI 1 (ARMv6, RAM limitata): il -O2 di default puo'
+far si' che il processo gcc che compila cpu.c termini senza produrre
+il .so e senza un errore chiaro nel log (osservato senza traccia di
+OOM kill in dmesg - probabilmente solo troppo oneroso per la CPU/RAM
+disponibili su questo modello). Se succede, ricompilare con
+ottimizzazione piu' bassa risolve, a costo di poco (il guadagno di
+Cython viene soprattutto dalla tipizzazione statica dei registri in
+cpu.pxd, non da -O2):
+
+    CFLAGS="-O0" python3 build_cython.py
+
 L'estensione compilata e' SPECIFICA della piattaforma (architettura
 CPU + versione Python) che l'ha generata - un .so compilato su questo
 Pi 1 (ARMv6) non funziona su un'altra macchina, e viceversa. Per
