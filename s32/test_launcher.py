@@ -876,11 +876,24 @@ check("un OSError a meta' partita: il tentativo che fallisce viene registrato", 
 # fallito (input_byte sarebbe stato 0xBB, non 0xAA).
 # ---------------------------------------------------------------
 _chiamate_cpu_run = []
-_orig_cpu_run = launcher.CPU.run
-def _cpu_run_spia(self, *a, **k):
-    _chiamate_cpu_run.append((k.get('input_byte'), k.get('extra_inputs')))
-    return _orig_cpu_run(self, *a, **k)
-launcher.CPU.run = _cpu_run_spia
+
+class _CpuSpia(launcher.CPU):
+    """Sottoclasse invece di rimpiazzare il metodo sulla classe -
+    launcher.CPU puo' essere la 'cdef class' compilata da Cython
+    (vedi cpu.pxd/build_cython.py, issue #22): una cdef class e'
+    IMMUTABILE a livello di classe (launcher.CPU.run = altra_funzione
+    solleva TypeError, provato) - ma un metodo cpdef (come run(), vedi
+    cpu.pxd) resta sovrascrivibile da una sottoclasse Python normale,
+    compilata o no. Si rimpiazza launcher.CPU stesso (una semplice
+    riassegnazione di nome nel modulo, non una mutazione della classe)
+    cosi' run_direct() - che costruisce internamente CPU() usando
+    launcher.CPU - istanzia questa sottoclasse senza saperlo."""
+    def run(self, *a, **k):
+        _chiamate_cpu_run.append((k.get('input_byte'), k.get('extra_inputs')))
+        return super().run(*a, **k)
+
+_CPU_originale = launcher.CPU
+launcher.CPU = _CpuSpia
 
 class _SessioneVettoreFisso:
     """Ritorna sempre lo stesso vettore (0xAA, 0xBB) per ogni frame,
@@ -906,7 +919,7 @@ try:
         check(f"mapping porte (local_player_index={_idx_locale}): extra_inputs e' SEMPRE frame_inputs[1:]",
               all(ei == (0xBB,) for _, ei in _chiamate_cpu_run), True)
 finally:
-    launcher.CPU.run = _orig_cpu_run
+    launcher.CPU = _CPU_originale
 
 # ---------------------------------------------------------------
 # Test 14: start_netcode_host() annuncia sulla LAN (LanAnnouncer) per

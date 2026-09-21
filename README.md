@@ -1968,3 +1968,96 @@ per 2 secondi. 6 nuovi test in `test_launcher.py` per il parsing del
 flag (numero valido, mancante, non numerico, non positivo). Prossimo
 passo: rilanciare il benchmark con molti piu' frame, sia con PyPy che
 con CPython, per un confronto equo.
+
+## Verdetto finale su PyPy: guadagno reale ma impraticabile - si passa a Cython
+
+A 5000 frame PyPy era ANCORA piu' lento di CPython (`0.86ms` contro
+`0.44ms`) - il riscaldamento migliorava (da 2.33ms a 120 frame) ma
+non bastava. Isolato SOLO `cpu.run()` (bypassando le costose misure
+di rendering di `--benchmark`, che avrebbero richiesto piu' di
+un'ora a 50000 frame) con un piccolo script diretto: a 50000 frame
+PyPy raggiunge finalmente **0.075ms/frame contro 0.380ms di CPython -
+un guadagno reale di 5x**, confermato sull'hardware vero.
+
+**Perche' comunque non si usa**: il riscaldamento non e' un costo una
+tantum, e' per-sessione - ogni riavvio del gioco rivivrebbe la fase
+in cui PyPy e' piu' lento di CPython (fino ad almeno 5000 frame,
+~1-2 minuti di gioco) prima di arrivare al guadagno. In piu', la
+build di pygame sotto PyPy si e' rotta su un'incompatibilita' nota
+(il modulo MIDI, `pypm.c`, usa un header interno di CPython -
+`internal/pycore_frame.h` - che PyPy non fornisce) - risolvibile
+patchando il file `Setup` generato in fase di build, ma un ulteriore
+strato di complessita' per un guadagno che non si sente comunque nei
+primi minuti di ogni partita. Issue #21 chiusa con questa conclusione.
+
+## Cython: stesso principio di PyPy (compilare invece di interpretare), senza riscaldamento
+
+A differenza di PyPy (cambia INTERPRETE per l'intero programma),
+Cython compila in ANTICIPO solo il modulo che serve (`cpu.py`) in
+un'estensione nativa - il resto del programma (pygame incluso) resta
+CPython normale, invariato. Nessun riscaldamento: la versione
+compilata e' gia' alla sua velocita' massima dalla primissima
+chiamata, non serve aspettare che un JIT la impari.
+
+**`s32/cpu.pxd`** (nuovo): dichiarazioni di tipo per Cython, lette
+SOLO in fase di compilazione - `cpu.py` resta un file Python
+NORMALE, invariato, e funziona identico se non lo si compila mai
+("pure Python mode" di Cython: un file `.pxd` accanto a un `.py` gli
+assegna tipi C senza toccarne la sintassi). Tipizzati i registri
+(`a`/`x`/`y`/`pc`/`sp`/`flags`, `long`) e il valore di ritorno dei
+metodi `_op_XX` (`bint`) - questi sono lo stesso oggetto Python
+allocato/deallocato (con overhead di refcounting) ad ogni lettura o
+scrittura, decine di volte per istruzione emulata. Deliberatamente
+NON tipizzato `mem` (bytearray, con semantica di slicing diversa da
+un memoryview tipizzato - acceduto pesantemente anche fuori da
+questo modulo, rischio di rompere qualcosa in silenzio per un
+guadagno marginale) ne' il meccanismo di dispatch (tabella opcode ->
+metodo, vedi `step()`) - riscriverlo come uno switch avrebbe richiesto
+due logiche diverse a seconda che il modulo sia compilato o meno,
+invece di restare fedeli allo stesso identico dict-lookup sempre.
+
+**`s32/build_cython.py`** (nuovo): script di build - `python3
+build_cython.py` produce un file `cpu.cpython-*.so` ACCANTO a
+`cpu.py`, che Python usa automaticamente al posto del sorgente ad
+ogni `import cpu` (le estensioni compilate hanno sempre la precedenza
+sul `.py` con lo stesso nome - nessun codice di fallback esplicito
+necessario da nessuna parte nel progetto). Uno dei file `.so`
+compilati non e' mai stato committato (specifico di piattaforma -
+architettura CPU + versione Python - vedi `.gitignore`): ogni
+macchina che vuole il guadagno se lo compila da se', una volta.
+**Trappola da conoscere**: modificare `cpu.py` DOPO aver compilato
+lascia Python a usare silenziosamente la versione VECCHIA finche' non
+si rilancia lo script - la prima cosa da controllare per un
+comportamento "impossibile" durante lo sviluppo di `cpu.py` e' se
+esiste un `.so` compilato nella cartella.
+
+**Bug reale trovato dai test esistenti, non ipotizzato**: una `cdef
+class` (compilata) e' IMMUTABILE a livello di classe - due cose che
+funzionavano su `cpu.py` puro Python hanno smesso di funzionare
+sull'estensione compilata:
+1. `cpu.sound_bank = {...}` (assegnato da `launcher.py`, mai da
+   `cpu.py` stesso) falliva con `AttributeError` - un attributo
+   nuovo non dichiarato in `cpu.pxd` non si puo' aggiungere al volo
+   su una cdef class, a differenza di una classe Python normale.
+   Aggiunto a `cpu.pxd`.
+2. Un test (`test_launcher.py`, Test 13ter) faceva
+   `launcher.CPU.run = una_funzione_spia` per intercettare le
+   chiamate - `TypeError: cannot set 'run' attribute of immutable
+   type` su una cdef class. Sistemato con una sottoclasse Python
+   (`class _CpuSpia(launcher.CPU): def run(self, ...): ...`) che
+   sovrascrive `run()` (un metodo `cpdef`, quindi sovrascrivibile da
+   una sottoclasse anche se compilato) e sostituendo `launcher.CPU`
+   stesso (una riassegnazione di nome, non una mutazione della
+   classe) - pattern riutilizzabile per qualunque test futuro che
+   debba "spiare" un metodo di `CPU`.
+
+**Misurato qui in ambiente di sviluppo** (x86_64, solo un controllo
+di correttezza/direzione - non predice il numero assoluto sulla Pi
+1): `cpu.run()` passa da `0.00425ms` a `0.00121ms` per frame - un
+guadagno di **~3.5x**, senza alcun riscaldamento (gia' cosi' veloce
+alla primissima chiamata). Suite di test completa (433 test) verde
+IDENTICA sia con l'estensione compilata attiva sia senza - stesso
+comportamento, solo piu' veloce.
+
+**Prossimo passo**: l'utente lancia `python3 build_cython.py` sulla
+Pi 1 reale e rimisura `cpu.run()` per il numero vero su quella CPU.
