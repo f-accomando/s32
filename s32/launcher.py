@@ -1543,12 +1543,25 @@ def run_benchmark(path, kind, n_frames=120, profile=False):
 
 
 def parse_flags(argv):
-    """Estrae i flag di prestazioni (--stats, --benchmark, --profile,
-    --surface-renderer, --buffer-renderer, --gpu-renderer, --fullscreen,
-    --no-audio, --playtest, --playtest-quick, --netplay-host,
-    --netplay-join) da argv, ritornando (argv_ripulito, dict_flag) -
-    separato da determine_mode() apposta, per restare entrambi
-    testabili singolarmente.
+    """Estrae i flag di prestazioni (--stats, --benchmark,
+    --benchmark-frames, --profile, --surface-renderer,
+    --buffer-renderer, --gpu-renderer, --fullscreen, --no-audio,
+    --playtest, --playtest-quick, --netplay-host, --netplay-join) da
+    argv, ritornando (argv_ripulito, dict_flag) - separato da
+    determine_mode() apposta, per restare entrambi testabili
+    singolarmente.
+
+    --benchmark-frames <N> cambia quanti frame misura --benchmark
+    (default 120, vedi run_benchmark()) - serve per confrontare
+    CPython/PyPy: con solo 120 frame il JIT di PyPy non fa in tempo a
+    "scaldarsi" (compila il ciclo caldo in codice nativo solo dopo
+    averlo visto girare abbastanza) e puo' risultare PIU' LENTO di
+    CPython sullo stesso identico benchmark - segnalato dall'utente
+    testando davvero su Pi 1 (cpu.run(): 2.33ms/frame con PyPy contro
+    0.48ms/frame con CPython, a 120 frame). Con molti piu' frame il
+    costo di riscaldamento si ammortizza su un numero maggiore di
+    iterazioni, avvicinandosi al caso reale di una partita giocata per
+    minuti, non per 2 secondi.
 
     L'audio e' ATTIVO DI DEFAULT (--no-audio per disattivarlo - utile
     su Raspberry Pi con ALSA mal configurato, vedi AudioPlayer).
@@ -1565,7 +1578,7 @@ def parse_flags(argv):
     consumano 2 argomenti SUCCESSIVI, non solo se stessi. Lasciati
     fuori dal kit di rete originale apposta ("meglio scriverlo voi
     seguendo lo stile esistente"), aggiunti qui."""
-    flags = {'stats': False, 'benchmark': False, 'profile': False, 'renderer': 'dirty-rects', 'fullscreen': False, 'audio': True, 'playtest': False, 'playtest_quick': False,
+    flags = {'stats': False, 'benchmark': False, 'benchmark_frames': None, 'profile': False, 'renderer': 'dirty-rects', 'fullscreen': False, 'audio': True, 'playtest': False, 'playtest_quick': False,
               'netplay_host_port': None, 'netplay_host_players': None, 'netplay_join_addr': None}
     rest = []
     i = 0
@@ -1575,6 +1588,17 @@ def parse_flags(argv):
             flags['stats'] = True
         elif arg == '--benchmark':
             flags['benchmark'] = True
+        elif arg == '--benchmark-frames':
+            if i + 1 >= len(argv):
+                raise LauncherError('--benchmark-frames richiede un argomento: <N>')
+            try:
+                n = int(argv[i+1])
+            except ValueError:
+                raise LauncherError(f'--benchmark-frames: deve essere un numero intero (ricevuto "{argv[i+1]}")')
+            if n <= 0:
+                raise LauncherError(f'--benchmark-frames: deve essere positivo (ricevuto {n})')
+            flags['benchmark_frames'] = n
+            i += 1
         elif arg == '--profile':
             flags['profile'] = True
         elif arg == '--surface-renderer':
@@ -1633,7 +1657,7 @@ def main():
     else:
         _, path, kind = mode
         if flags['benchmark'] or flags['profile']:
-            run_benchmark(path, kind, profile=flags['profile'])
+            run_benchmark(path, kind, n_frames=flags['benchmark_frames'] or 120, profile=flags['profile'])
         else:
             netcode_session = None
             local_player_index = 0
