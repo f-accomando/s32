@@ -5,12 +5,15 @@ __pycache__/
 # della macchina, non del progetto, vedi s32/player_profile.py
 s32/player_profile.json
 
-# artefatti di build_cython.py (issue #22) - estensione compilata
-# SPECIFICA di piattaforma (architettura CPU + versione Python), mai
-# da committare: ogni macchina che vuole il guadagno di velocita' se
-# la compila da se' lanciando build_cython.py una volta, vedi li'
-# per i dettagli. cpu.py resta il sorgente valido e invariato.
+# artefatti di build_cython.py (issue #22, esteso a ppu.py per le
+# prestazioni del rendering) - estensioni compilate SPECIFICHE di
+# piattaforma (architettura CPU + versione Python), mai da
+# committare: ogni macchina che vuole il guadagno di velocita' se le
+# compila da se' lanciando build_cython.py una volta, vedi li' per i
+# dettagli. cpu.py/ppu.py restano il sorgente valido e invariato.
 s32/cpu*.so
 s32/cpu.c
+s32/ppu*.so
+s32/ppu.c
 s32/build/
 s32/build_cython_tmp/

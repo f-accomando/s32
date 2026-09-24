@@ -51,9 +51,9 @@ def decode_color(cgram, palette_index, color_index):
     r5 = raw & 0x1f
     g5 = (raw >> 5) & 0x1f
     b5 = (raw >> 10) & 0x1f
-    # scala 5 bit (0-31) a 8 bit (0-255)
-    scale = lambda v: (v * 255) // 31
-    return (scale(r5), scale(g5), scale(b5))
+    # scala 5 bit (0-31) a 8 bit (0-255) - niente lambda: una chiusura
+    # dentro una funzione cpdef non e' supportata da Cython
+    return ((r5 * 255) // 31, (g5 * 255) // 31, (b5 * 255) // 31)
 
 
 def read_tilemap_entry(vram, tx, ty):
@@ -68,6 +68,69 @@ def read_tilemap_entry(vram, tx, ty):
     tile_index = raw & 0x0fff        # 12 bit
     palette = (raw >> 12) & 0x07     # 3 bit
     return tile_index, palette
+
+
+def get_tile(vram, tile_cache, tile_index):
+    """Decodifica un tile con cache PER-CHIAMATA (tile_cache e'
+    tipicamente locale a una singola invocazione di
+    render_background_window()/draw_sprites(), non persistente tra
+    frame - a differenza di blob_cache, vedi get_tile_blob()): evita
+    di ridecodificare lo stesso tile piu' volte nella stessa passata
+    (es. un pavimento fatto dello stesso tile ripetuto).
+
+    Funzione di modulo (non piu' una chiusura locale) apposta per
+    poter essere tipizzata da Cython (vedi ppu.pxd) - una chiusura
+    annidata non e' dichiarabile in un .pxd."""
+    if tile_index not in tile_cache:
+        tile_cache[tile_index] = decode_tile(vram, tile_index)
+    return tile_cache[tile_index]
+
+
+def get_color(cgram, color_cache, palette, color_index):
+    """Decodifica un colore da CGRAM con cache PER-CHIAMATA, stesso
+    motivo di get_tile(). Condivisa da render_background_window() e
+    draw_sprites() (prima duplicata come due chiusure identiche)."""
+    key = (palette, color_index)
+    color = color_cache.get(key)
+    if color is None:
+        color = decode_color(cgram, palette, color_index)
+        color_cache[key] = color
+    return color
+
+
+def get_tile_blob(vram, cgram, tile_cache, color_cache, blob_cache, tile_index, palette):
+    """Costruisce (o recupera da blob_cache) il blob RGB pre-renderizzato
+    di un tile con una palette specifica - vedi render_background_window()
+    per il perche' blob_cache conta cosi' tanto (PERSISTENTE tra i
+    frame durante lo scroll, a differenza di tile_cache/color_cache
+    che sono locali a una singola chiamata)."""
+    key = (tile_index, palette)
+    if key in blob_cache:
+        return blob_cache[key]
+    grid = get_tile(vram, tile_cache, tile_index)
+    has_content = False
+    for row in grid:
+        for color_index in row:
+            if color_index != 0:
+                has_content = True
+                break
+        if has_content:
+            break
+    if not has_content:
+        blob_cache[key] = None
+        return None
+    blob = bytearray(TILE_SIZE_PX * TILE_SIZE_PX * 3)
+    i = 0
+    for row in grid:
+        for color_index in row:
+            if color_index != 0:
+                r, g, b = get_color(cgram, color_cache, palette, color_index)
+                blob[i] = r
+                blob[i + 1] = g
+                blob[i + 2] = b
+            i += 3
+    blob_cache[key] = blob
+    return blob
 
 
 def get_pixel(buf, x, y):
@@ -129,21 +192,7 @@ def render_background_window(vram, cgram, scroll_x, scroll_y, window_y_start, wi
     buf = bytearray(SCREEN_W_PX * window_height * 3)
 
     tile_cache = {}
-
-    def get_tile(idx):
-        if idx not in tile_cache:
-            tile_cache[idx] = decode_tile(vram, idx)
-        return tile_cache[idx]
-
     color_cache = {}
-
-    def get_color(palette, color_index):
-        key = (palette, color_index)
-        color = color_cache.get(key)
-        if color is None:
-            color = decode_color(cgram, palette, color_index)
-            color_cache[key] = color
-        return color
 
     # tile PRE-RENDERIZZATI come blocco di byte RGB, con i pixel
     # trasparenti (indice 0) sostituiti dal nero di sfondo - cosi' un
@@ -154,38 +203,11 @@ def render_background_window(vram, cgram, scroll_x, scroll_y, window_y_start, wi
     # azzerato), quindi copiare un blocco tutto-nero sopra e' spreco
     # puro: lo saltiamo del tutto (vedi uso sotto). blob_cache e'
     # ESTERNO (passato dal chiamante) quando serve farlo sopravvivere
-    # tra i frame - vedi docstring sopra.
+    # tra i frame - vedi docstring sopra. get_tile/get_color/
+    # get_tile_blob sono funzioni di modulo (vedi sopra), non piu'
+    # chiusure locali - necessario per tipizzarle con Cython.
     if blob_cache is None:
         blob_cache = {}
-
-    def get_tile_blob(tile_index, palette):
-        key = (tile_index, palette)
-        if key in blob_cache:
-            return blob_cache[key]
-        grid = get_tile(tile_index)
-        has_content = False
-        for row in grid:
-            for color_index in row:
-                if color_index != 0:
-                    has_content = True
-                    break
-            if has_content:
-                break
-        if not has_content:
-            blob_cache[key] = None
-            return None
-        blob = bytearray(TILE_SIZE_PX * TILE_SIZE_PX * 3)
-        i = 0
-        for row in grid:
-            for color_index in row:
-                if color_index != 0:
-                    r, g, b = get_color(palette, color_index)
-                    blob[i] = r
-                    blob[i + 1] = g
-                    blob[i + 2] = b
-                i += 3
-        blob_cache[key] = blob
-        return blob
 
     # --- sfondo: copia OGNI RIGA di un tile visibile con una sola
     # slice assignment (fino a 24 byte in un colpo), non 8 assegnazioni
@@ -209,7 +231,7 @@ def render_background_window(vram, cgram, scroll_x, scroll_y, window_y_start, wi
         for tc in range(n_tile_cols):
             map_col = first_tile_col + tc
             tile_index, palette = read_tilemap_entry(vram, map_col, map_row)
-            blob = get_tile_blob(tile_index, palette)
+            blob = get_tile_blob(vram, cgram, tile_cache, color_cache, blob_cache, tile_index, palette)
             if blob is None:
                 continue  # tile vuoto: il buffer e' gia' nero qui, niente da fare
             screen_x_base = tc * TILE_SIZE_PX - first_col_offset
@@ -310,26 +332,14 @@ def draw_sprites(buf, oam, cgram, vram):
     ridisegnati sempre - ma sono pochi (tipicamente una manciata),
     molto piu' economico che rifare anche lo sfondo. vram serve per
     decodificare i tile degli sprite (stesso spazio grafico dello
-    sfondo, indici diversi)."""
+    sfondo, indici diversi). get_tile/get_color sono le stesse
+    funzioni di modulo usate da render_background_window() (prima
+    duplicate qui come due chiusure locali identiche)."""
     color_cache = {}
-
-    def get_color(palette, color_index):
-        key = (palette, color_index)
-        color = color_cache.get(key)
-        if color is None:
-            color = decode_color(cgram, palette, color_index)
-            color_cache[key] = color
-        return color
-
     tile_cache = {}
 
-    def get_tile(idx):
-        if idx not in tile_cache:
-            tile_cache[idx] = decode_tile(vram, idx)
-        return tile_cache[idx]
-
     for tile_index, palette, ox, oy in iter_visible_sprite_tiles(oam):
-        grid = get_tile(tile_index)
+        grid = get_tile(vram, tile_cache, tile_index)
         for ry in range(TILE_SIZE_PX):
             py = oy + ry
             if py < 0 or py >= SCREEN_H_PX:
@@ -341,7 +351,7 @@ def draw_sprites(buf, oam, cgram, vram):
                     continue
                 px = ox + rx
                 if 0 <= px < SCREEN_W_PX:
-                    r, g, b = get_color(palette, color_index)
+                    r, g, b = get_color(cgram, color_cache, palette, color_index)
                     off = (py * SCREEN_W_PX + px) * 3
                     buf[off] = r
                     buf[off + 1] = g
