@@ -1027,16 +1027,37 @@ def _write_changed_rows(dst, out, prev, row_bytes, n_rows):
 
     Ritorna il numero di righe effettivamente riscritte - usato dai
     test per verificare che le righe invariate vengano davvero
-    saltate, non solo che il risultato finale sia corretto."""
+    saltate, non solo che il risultato finale sia corretto.
+
+    MISURATO su Raspberry Pi 1 vero: la prima versione di questa
+    funzione confrontava le righe con `out[start:end] != prev[start:end]`
+    - ogni slice su un bytearray/bytes CREA UNA COPIA nuova (960 byte
+    qui), quindi 320 confronti = 320 allocazioni+copie A OGNI FRAME,
+    anche quando NESSUNA riga era cambiata. Su questo hardware
+    lentissimo, quel costo fisso da solo valeva gia' ~200ms/frame -
+    identico che scrivessimo 0 righe o 26, il "risparmio" del
+    dirty-diff veniva mangiato dal costo del confronto stesso.
+    Corretto con due passaggi:
+    1) un confronto dell'INTERO buffer prima di tutto (out == prev,
+       un solo memcmp a livello C su 307KB) - se il frame e' identico
+       al precedente, si esce subito senza toccare le 320 righe;
+    2) per il confronto riga per riga (frame DIVERSO da quello
+       precedente), si usano memoryview invece di slice dirette:
+       affettare un memoryview NON copia i dati (crea solo una vista
+       sullo stesso buffer), a differenza di affettare un bytearray."""
     if prev is None:
         dst[0:len(out)] = out
         return n_rows
+    if out == prev:
+        return 0
+    out_mv = memoryview(out)
+    prev_mv = memoryview(prev)
     written = 0
     for y in range(n_rows):
         start = y * row_bytes
         end = start + row_bytes
-        if out[start:end] != prev[start:end]:
-            dst[start:end] = out[start:end]
+        if out_mv[start:end] != prev_mv[start:end]:
+            dst[start:end] = out_mv[start:end]
             written += 1
     return written
 
