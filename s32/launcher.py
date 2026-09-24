@@ -165,7 +165,7 @@ def _load_cart_graphics(cpu, cart_dir):
         cpu.sound_bank = module.build_sound_bank()
 
 
-def run_direct(path, kind, show_stats=False, quit_pygame_at_end=True, renderer_mode='dirty-rects', fullscreen=False, use_audio=False, playtest=False, playtest_quick=False, netcode_session=None, local_player_index=0):
+def run_direct(path, kind, show_stats=False, quit_pygame_at_end=True, renderer_mode='dirty-rects', fullscreen=False, use_audio=False, playtest=False, playtest_quick=False, netcode_session=None, local_player_index=0, fbdev_path=None):
     """Bypassa il menu, carica ed esegue direttamente la cartuccia
     data - stesso comportamento immediato della v1 (python3 main.py).
 
@@ -194,7 +194,8 @@ def run_direct(path, kind, show_stats=False, quit_pygame_at_end=True, renderer_m
     return _run_pygame_loop(cpu, show_stats=show_stats, quit_pygame_at_end=quit_pygame_at_end,
                              renderer_mode=renderer_mode, fullscreen=fullscreen,
                              use_audio=use_audio, playtest=playtest, playtest_quick=playtest_quick,
-                             netcode_session=netcode_session, local_player_index=local_player_index)
+                             netcode_session=netcode_session, local_player_index=local_player_index,
+                             fbdev_path=fbdev_path)
 
 
 def _init_pygame_once():
@@ -996,6 +997,59 @@ def _playtest_sequence(quick=False):
     return seq
 
 
+class FramebufferRenderer:
+    """Quinto percorso di rendering (--fbdev-renderer): scrive
+    render_background()+draw_sprites() DIRETTAMENTE su un framebuffer
+    Linux (es. /dev/fb1, un LCD collegato via GPIO), bypassando SDL
+    per l'OUTPUT VIDEO. Nato perche' su Raspberry Pi 1 con Pi OS Lite
+    headless nessun driver SDL2 reale e' disponibile: KMSDRM richiede
+    /dev/dri (il kernel di questo modello non lo espone - niente
+    supporto DRM/KMS), x11/wayland richiedono un server grafico in
+    esecuzione (nessuno, headless), fbcon/directfb non sono compilati
+    nelle build recenti di SDL2 (rimossi dal sorgente stesso, non solo
+    disabilitati). Risultato: SDL2 cade silenziosamente sul driver
+    'offscreen', che non disegna da nessuna parte - ne' su HDMI ne'
+    sull'LCD, senza nessun errore evidente.
+
+    pygame/SDL restano usati per audio e input (funzionano anche col
+    driver 'offscreen', verificato: --playtest gira fino in fondo e
+    stampa le statistiche) - solo l'ultimo passo, il disegno a
+    schermo, e' sostituito con questa scrittura diretta al device.
+
+    Conversione RGB888->RGB565 (formato nativo di questo LCD, vedi
+    `fbset -fb /dev/fb1`): stesso bit-packing di un piccolo script
+    dell'utente che mostrava gia' un'immagine statica sull'LCD scrivendo
+    su questo stesso device (byte basso poi byte alto, little-endian).
+
+    ATTENZIONE PRESTAZIONI: qui il loop di conversione e' Python puro,
+    NON ancora tipizzato con Cython come cpu.py/ppu.py - su 480x320 =
+    153.600 pixel/frame potrebbe diventare il nuovo collo di bottiglia
+    su Pi 1. Verificare con --stats prima di ottimizzare (stessa
+    filosofia "misura, non indovinare" usata per cpu.py/ppu.py)."""
+
+    def __init__(self, fb_path="/dev/fb1"):
+        self.fb_path = fb_path
+        self.fb = open(fb_path, "r+b")
+
+    def render(self, frame_buf):
+        out = bytearray(len(frame_buf) // 3 * 2)
+        j = 0
+        for i in range(0, len(frame_buf), 3):
+            r = frame_buf[i]
+            g = frame_buf[i + 1]
+            b = frame_buf[i + 2]
+            p = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+            out[j] = p & 0xff
+            out[j + 1] = (p >> 8) & 0xff
+            j += 2
+        self.fb.seek(0)
+        self.fb.write(out)
+        self.fb.flush()
+
+    def close(self):
+        self.fb.close()
+
+
 def _pixels_to_surface(pixels, w, h):
     """render_frame() ora ritorna gia' un buffer piatto RGB (bytearray)
     - frombuffer() lo impacchetta in una Surface con un'unica
@@ -1006,7 +1060,7 @@ def _pixels_to_surface(pixels, w, h):
     return pygame.image.frombuffer(bytes(pixels), (w, h), 'RGB')
 
 
-def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mode='dirty-rects', fullscreen=False, use_audio=False, playtest=False, playtest_quick=False, netcode_session=None, local_player_index=0):
+def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mode='dirty-rects', fullscreen=False, use_audio=False, playtest=False, playtest_quick=False, netcode_session=None, local_player_index=0, fbdev_path=None):
     """Il ciclo CPU->PPU->schermo a 60fps. show_stats=True stampa in
     console fps/tempo cpu/tempo render (disegno+blit insieme, vedi
     sotto) ogni secondo, utile per misurare le prestazioni su
@@ -1033,6 +1087,11 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
         blit()/frame con overhead fisso ciascuna, e SRCALPHA ha un
         costo di compositing che SDL software non ammortizza.
         Lasciato dietro flag per chi ha un driver video accelerato.
+      'fbdev' (flag --fbdev-renderer, opzionale --fbdev-path) -
+        FramebufferRenderer: scrive direttamente su un framebuffer
+        Linux (default /dev/fb1), bypassando SDL per l'output video -
+        vedi quella classe per il perche' (nessun driver SDL2 reale
+        disponibile su alcuni Raspberry Pi headless).
 
     Perche' dirty-rects batte surface nettamente pur usando anch'esso
     blit() per gli sprite: il numero di chiamate blit()/frame e' la
@@ -1076,6 +1135,7 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
     surface_renderer = SurfaceRenderer(pygame) if renderer_mode == 'surface' else None
     incremental_renderer = IncrementalRenderer(pygame) if renderer_mode == 'dirty-rects' else None
     gpu_renderer = GpuRenderer(pygame, gpu_sdl_renderer) if renderer_mode == 'gpu' else None
+    fbdev_renderer = FramebufferRenderer(fbdev_path or "/dev/fb1") if renderer_mode == 'fbdev' else None
     audio_player = AudioPlayer(pygame, use_audio, sound_bank=getattr(cpu, 'sound_bank', None))
 
     # cache dello sfondo (percorso 'buffer'): ricalcolato SOLO quando
@@ -1236,6 +1296,19 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
                                          cpu.scroll_x, cpu.scroll_y)
             # NON chiama flip() qui: IncrementalRenderer aggiorna gia'
             # da solo, in modo parziale, con pygame.display.update()
+        elif fbdev_renderer is not None:
+            cache_key = (cpu.current_stage, cpu.scroll_x, cpu.scroll_y)
+            if bg_cache_key != cache_key:
+                bg_cache_buf = render_background(vram, cgram, cpu.scroll_x, cpu.scroll_y,
+                                                   blob_cache=tile_blob_cache)
+                bg_cache_key = cache_key
+            frame_buf = bytearray(bg_cache_buf)
+            draw_sprites(frame_buf, oam, cgram, vram)
+            fbdev_renderer.render(frame_buf)
+            # NON chiama pygame.display.flip(): l'output va al
+            # framebuffer del device, non alla finestra SDL (che qui
+            # non disegna comunque nulla di visibile, vedi
+            # FramebufferRenderer)
         else:
             if surface_renderer is not None:
                 surface_renderer.render(screen, vram, oam, cgram, cpu.current_stage,
@@ -1312,6 +1385,9 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
     if playtest_seq is not None:
         _print_playtest_summary(phase_stats, renderer_mode,
                                  time.perf_counter() - playtest_t_start)
+
+    if fbdev_renderer is not None:
+        fbdev_renderer.close()
 
     if quit_pygame_at_end:
         pygame.quit()
@@ -1545,11 +1621,17 @@ def run_benchmark(path, kind, n_frames=120, profile=False):
 def parse_flags(argv):
     """Estrae i flag di prestazioni (--stats, --benchmark,
     --benchmark-frames, --profile, --surface-renderer,
-    --buffer-renderer, --gpu-renderer, --fullscreen, --no-audio,
-    --playtest, --playtest-quick, --netplay-host, --netplay-join) da
-    argv, ritornando (argv_ripulito, dict_flag) - separato da
-    determine_mode() apposta, per restare entrambi testabili
-    singolarmente.
+    --buffer-renderer, --gpu-renderer, --fbdev-renderer, --fbdev-path,
+    --fullscreen, --no-audio, --playtest, --playtest-quick,
+    --netplay-host, --netplay-join) da argv, ritornando
+    (argv_ripulito, dict_flag) - separato da determine_mode() apposta,
+    per restare entrambi testabili singolarmente.
+
+    --fbdev-renderer scrive direttamente su un framebuffer Linux
+    invece di usare SDL per l'output video (vedi FramebufferRenderer) -
+    utile quando nessun driver SDL2 reale e' disponibile (es. Pi 1
+    headless senza /dev/dri). --fbdev-path <path> cambia il device di
+    default (/dev/fb1).
 
     --benchmark-frames <N> cambia quanti frame misura --benchmark
     (default 120, vedi run_benchmark()) - serve per confrontare
@@ -1579,6 +1661,7 @@ def parse_flags(argv):
     fuori dal kit di rete originale apposta ("meglio scriverlo voi
     seguendo lo stile esistente"), aggiunti qui."""
     flags = {'stats': False, 'benchmark': False, 'benchmark_frames': None, 'profile': False, 'renderer': 'dirty-rects', 'fullscreen': False, 'audio': True, 'playtest': False, 'playtest_quick': False,
+              'fbdev_path': None,
               'netplay_host_port': None, 'netplay_host_players': None, 'netplay_join_addr': None}
     rest = []
     i = 0
@@ -1607,6 +1690,13 @@ def parse_flags(argv):
             flags['renderer'] = 'buffer'
         elif arg == '--gpu-renderer':
             flags['renderer'] = 'gpu'
+        elif arg == '--fbdev-renderer':
+            flags['renderer'] = 'fbdev'
+        elif arg == '--fbdev-path':
+            if i + 1 >= len(argv):
+                raise LauncherError('--fbdev-path richiede un argomento: <path>, es. /dev/fb1')
+            flags['fbdev_path'] = argv[i+1]
+            i += 1
         elif arg == '--fullscreen':
             flags['fullscreen'] = True
         elif arg == '--audio':
@@ -1680,7 +1770,8 @@ def main():
             run_direct(path, kind, show_stats=flags['stats'], renderer_mode=flags['renderer'],
                        fullscreen=flags['fullscreen'], use_audio=flags['audio'], playtest=flags['playtest'],
                        playtest_quick=flags['playtest_quick'],
-                       netcode_session=netcode_session, local_player_index=local_player_index)
+                       netcode_session=netcode_session, local_player_index=local_player_index,
+                       fbdev_path=flags['fbdev_path'])
 
 
 if __name__ == '__main__':

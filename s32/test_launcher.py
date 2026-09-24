@@ -153,7 +153,7 @@ import io
 import contextlib
 
 rest1, flags1 = parse_flags(['launcher.py', 'gioco.py'])
-check("nessun flag: dict tutto False (renderer='dirty-rects', ora default)", flags1, {'stats': False, 'benchmark': False, 'benchmark_frames': None, 'profile': False, 'renderer': 'dirty-rects', 'fullscreen': False, 'audio': True, 'playtest': False, 'playtest_quick': False, 'netplay_host_port': None, 'netplay_host_players': None, 'netplay_join_addr': None})
+check("nessun flag: dict tutto False (renderer='dirty-rects', ora default)", flags1, {'stats': False, 'benchmark': False, 'benchmark_frames': None, 'profile': False, 'renderer': 'dirty-rects', 'fullscreen': False, 'audio': True, 'playtest': False, 'playtest_quick': False, 'fbdev_path': None, 'netplay_host_port': None, 'netplay_host_players': None, 'netplay_join_addr': None})
 check("nessun flag: argv invariato", rest1, ['launcher.py', 'gioco.py'])
 
 rest2, flags2 = parse_flags(['launcher.py', 'gioco.py', '--stats'])
@@ -241,6 +241,22 @@ check("--playtest-quick: rimosso da argv", rest4j, ['launcher.py', 'gioco.py'])
 rest4k, flags4k = parse_flags(['launcher.py', 'gioco.py', '--gpu-renderer'])
 check("--gpu-renderer: imposta renderer='gpu'", flags4k['renderer'], 'gpu')
 check("--gpu-renderer: rimosso da argv", rest4k, ['launcher.py', 'gioco.py'])
+
+rest4l, flags4l = parse_flags(['launcher.py', 'gioco.py', '--fbdev-renderer'])
+check("--fbdev-renderer: imposta renderer='fbdev'", flags4l['renderer'], 'fbdev')
+check("--fbdev-renderer: rimosso da argv", rest4l, ['launcher.py', 'gioco.py'])
+check("--fbdev-renderer: senza --fbdev-path, resta None (FramebufferRenderer usa /dev/fb1 di default)",
+      flags4l['fbdev_path'], None)
+
+rest4m, flags4m = parse_flags(['launcher.py', 'gioco.py', '--fbdev-path', '/dev/fb0'])
+check("--fbdev-path: valore interpretato correttamente", flags4m['fbdev_path'], '/dev/fb0')
+check("--fbdev-path: consuma il suo argomento, non lo lascia in argv", rest4m, ['launcher.py', 'gioco.py'])
+
+try:
+    parse_flags(['launcher.py', 'gioco.py', '--fbdev-path'])
+    check("--fbdev-path senza argomento: solleva LauncherError come atteso", False, True)
+except LauncherError:
+    check("--fbdev-path senza argomento: solleva LauncherError come atteso", True, True)
 
 # ---------------------------------------------------------------
 # --netplay-host / --netplay-join: consumano 2 argomenti SUCCESSIVI
