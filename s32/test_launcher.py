@@ -1086,6 +1086,153 @@ finally:
     launcher.start_netcode_client = _orig_start_client_main
     launcher.run_direct = _orig_run_direct_main
 
+# ---------------------------------------------------------------
+# EvdevKeyboard (--fbdev-renderer in modalita' interattiva): finti
+# device evdev, nessun /dev/input reale necessario per i test.
+# ---------------------------------------------------------------
+import sys as _sys_evdev
+from launcher import EvdevKeyboard, LauncherError  # ri-based dopo importlib.reload(launcher)
+                                                     # piu' sopra - altrimenti except
+                                                     # LauncherError (la classe vecchia,
+                                                     # importata in cima al file) non
+                                                     # cattura le istanze sollevate dal
+                                                     # modulo ricaricato
+
+class _FakeEvdevEcodes:
+    EV_KEY = 1
+    KEY_A = 30
+    KEY_W = 17
+    KEY_S = 31
+    KEY_D = 32
+    KEY_UP = 103
+    KEY_DOWN = 108
+    KEY_LEFT = 105
+    KEY_RIGHT = 106
+    KEY_J = 36
+    KEY_SPACE = 57
+    KEY_ESC = 1
+
+class _FakeEvdevEvent:
+    def __init__(self, type_, code, value):
+        self.type = type_
+        self.code = code
+        self.value = value
+
+class _FakeEvdevDevice:
+    def __init__(self, path, has_key_a):
+        self.path = path
+        self._has_key_a = has_key_a
+        self._queued_events = []
+        self.grabbed = False
+        self.ungrabbed = False
+        self.closed = False
+
+    def capabilities(self):
+        keys = [_FakeEvdevEcodes.KEY_W, _FakeEvdevEcodes.KEY_UP]  # sempre presenti,
+                                                                    # niente lettera 'A'
+        if self._has_key_a:
+            keys.append(_FakeEvdevEcodes.KEY_A)
+        return {_FakeEvdevEcodes.EV_KEY: keys}
+
+    def grab(self):
+        self.grabbed = True
+
+    def ungrab(self):
+        self.ungrabbed = True
+
+    def close(self):
+        self.closed = True
+
+    def queue(self, code, value):
+        self._queued_events.append(_FakeEvdevEvent(_FakeEvdevEcodes.EV_KEY, code, value))
+
+    def read(self):
+        if self._queued_events:
+            evs = self._queued_events
+            self._queued_events = []
+            return iter(evs)
+        raise BlockingIOError()
+
+class _FakeEvdevModule:
+    ecodes = _FakeEvdevEcodes
+
+    def __init__(self, devices):
+        self._devices = devices  # {path: _FakeEvdevDevice}
+
+    def list_devices(self):
+        return list(self._devices.keys())
+
+    def InputDevice(self, path):
+        return self._devices[path]
+
+_orig_evdev_module = _sys_evdev.modules.get('evdev')
+
+# senza il modulo 'evdev' installato (caso reale di questa sandbox:
+# non e' tra le dipendenze del progetto) - errore chiaro, non un
+# ImportError grezzo
+try:
+    EvdevKeyboard()
+    check("EvdevKeyboard senza 'evdev' installato: solleva LauncherError", "nessun errore", "LauncherError")
+except LauncherError as exc:
+    check("EvdevKeyboard senza 'evdev' installato: solleva LauncherError", "LauncherError", "LauncherError")
+    check("EvdevKeyboard senza 'evdev': messaggio menziona 'evdev'", "evdev" in str(exc), True)
+
+try:
+    # nessun device ha il tasto 'A' (es. solo un mouse collegato)
+    mouse = _FakeEvdevDevice("/dev/input/event0", has_key_a=False)
+    _sys_evdev.modules['evdev'] = _FakeEvdevModule({"/dev/input/event0": mouse})
+    try:
+        EvdevKeyboard()
+        check("EvdevKeyboard: nessuna tastiera trovata -> LauncherError", "nessun errore", "LauncherError")
+    except LauncherError:
+        check("EvdevKeyboard: nessuna tastiera trovata -> LauncherError", "LauncherError", "LauncherError")
+
+    # un mouse (senza KEY_A) E una tastiera (con KEY_A) - deve scegliere la tastiera
+    mouse2 = _FakeEvdevDevice("/dev/input/event0", has_key_a=False)
+    kbd = _FakeEvdevDevice("/dev/input/event1", has_key_a=True)
+    _sys_evdev.modules['evdev'] = _FakeEvdevModule({"/dev/input/event0": mouse2, "/dev/input/event1": kbd})
+    ek = EvdevKeyboard()
+    check("EvdevKeyboard: sceglie il device con KEY_A (ignora il mouse)", ek.device.path, "/dev/input/event1")
+    check("EvdevKeyboard: prende il device in esclusiva (grab)", kbd.grabbed, True)
+
+    # poll() + input_byte(): freccia SU premuta
+    kbd.queue(_FakeEvdevEcodes.KEY_UP, 1)  # 1 = premuto
+    ek.poll()
+    check("EvdevKeyboard: KEY_UP premuto -> bit 0x01", ek.input_byte(), 0x01)
+
+    # rilascio: il bit torna a 0
+    kbd.queue(_FakeEvdevEcodes.KEY_UP, 0)  # 0 = rilasciato
+    ek.poll()
+    check("EvdevKeyboard: KEY_UP rilasciato -> nessun bit", ek.input_byte(), 0x00)
+
+    # WASD equivalente alle frecce (KEY_D -> stesso bit di KEY_RIGHT)
+    kbd.queue(_FakeEvdevEcodes.KEY_D, 1)
+    ek.poll()
+    check("EvdevKeyboard: KEY_D (WASD) equivale a destra -> bit 0x08", ek.input_byte(), 0x08)
+    kbd.queue(_FakeEvdevEcodes.KEY_D, 0)
+    ek.poll()
+
+    # piu' tasti insieme
+    kbd.queue(_FakeEvdevEcodes.KEY_LEFT, 1)
+    kbd.queue(_FakeEvdevEcodes.KEY_SPACE, 1)
+    ek.poll()
+    check("EvdevKeyboard: piu' tasti insieme -> bit combinati", ek.input_byte(), 0x04 | 0x10)
+
+    # ESC -> should_quit()
+    check("EvdevKeyboard: ESC non premuto -> should_quit() False", ek.should_quit(), False)
+    kbd.queue(_FakeEvdevEcodes.KEY_ESC, 1)
+    ek.poll()
+    check("EvdevKeyboard: ESC premuto -> should_quit() True", ek.should_quit(), True)
+
+    ek.close()
+    check("EvdevKeyboard: close() rilascia il grab (ungrab)", kbd.ungrabbed, True)
+    check("EvdevKeyboard: close() chiude il device", kbd.closed, True)
+finally:
+    if _orig_evdev_module is not None:
+        _sys_evdev.modules['evdev'] = _orig_evdev_module
+    else:
+        _sys_evdev.modules.pop('evdev', None)
+
 print()
 if fails == 0:
     print("Tutti i test passati.")

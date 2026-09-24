@@ -1012,10 +1012,14 @@ class FramebufferRenderer:
     'offscreen', che non disegna da nessuna parte - ne' su HDMI ne'
     sull'LCD, senza nessun errore evidente.
 
-    pygame/SDL restano usati per audio e input (funzionano anche col
-    driver 'offscreen', verificato: --playtest gira fino in fondo e
-    stampa le statistiche) - solo l'ultimo passo, il disegno a
-    schermo, e' sostituito con questa scrittura diretta al device.
+    pygame/SDL restano usati per audio (funziona anche col driver
+    'offscreen') e per l'input SOLO in modalita' --playtest (una
+    sequenza scriptata, non tastiera vera). Per il gioco interattivo
+    VERO, pygame.key.get_pressed() NON funziona qui: senza una
+    finestra SDL reale non c'e' mai focus, i tasti finiscono altrove
+    (es. il terminale SSH da cui e' stato lanciato il gioco) -
+    scoperto testando su hardware reale. Vedi EvdevKeyboard poco
+    sotto per come viene letta la tastiera in quel caso.
 
     Conversione RGB888->RGB565 (formato nativo di questo LCD, vedi
     `fbset -fb /dev/fb1`) in fb_convert.py, compilato con Cython come
@@ -1035,6 +1039,96 @@ class FramebufferRenderer:
 
     def close(self):
         self.fb.close()
+
+
+class EvdevKeyboard:
+    """Lettura tastiera diretta da /dev/input/eventX (libreria
+    'evdev'), usata SOLO con --fbdev-renderer in modalita'
+    INTERATTIVA (non --playtest/--playtest-quick, che usano una
+    sequenza scriptata e non hanno bisogno di una tastiera vera).
+
+    Perche' non pygame.key.get_pressed(): senza una finestra SDL reale
+    (vedi FramebufferRenderer) non c'e' mai focus, quindi SDL non
+    riceve mai gli eventi tastiera - scoperto testando su hardware
+    reale (i tasti finivano nel terminale SSH da cui era stato
+    lanciato il gioco). Stesso principio gia' applicato al video:
+    bypassare SDL dove SDL non funziona su questo hardware.
+
+    device.grab() prende il device in ESCLUSIVA: come effetto
+    collaterale utile, impedisce ANCHE che i tasti finiscano nel
+    terminale (risolve il sintomo originale, non solo la causa) - se
+    il processo termina in modo anomalo il grab si rilascia comunque
+    da solo (e' legato al file descriptor, chiuso automaticamente
+    dal kernel all'uscita del processo)."""
+
+    def __init__(self):
+        try:
+            import evdev
+        except ImportError:
+            raise LauncherError(
+                "--fbdev-renderer in modalita' interattiva richiede la libreria 'evdev' per "
+                "leggere la tastiera senza una finestra SDL vera (pip3 install evdev "
+                "--break-system-packages), oppure usa --playtest/--playtest-quick che non "
+                "ha bisogno di una tastiera reale."
+            )
+        self._evdev = evdev
+        device_path = None
+        for path in evdev.list_devices():
+            dev = evdev.InputDevice(path)
+            caps = dev.capabilities().get(evdev.ecodes.EV_KEY, [])
+            if evdev.ecodes.KEY_A in caps:  # trucco comune per distinguere
+                                              # una tastiera vera da un
+                                              # mouse/joystick (niente tasti
+                                              # lettera tra le sue capability)
+                device_path = path
+                break
+            dev.close()
+        if device_path is None:
+            raise LauncherError(
+                "--fbdev-renderer in modalita' interattiva: nessuna tastiera trovata tra i "
+                "device /dev/input/event* - collega una tastiera USB, oppure usa "
+                "--playtest/--playtest-quick che non ha bisogno di una tastiera reale."
+            )
+        self.device = evdev.InputDevice(device_path)
+        self.device.grab()
+        self._pressed = set()
+
+    def poll(self):
+        """Da chiamare una volta per frame: svuota (senza bloccare) la
+        coda di eventi pendenti e aggiorna l'insieme dei tasti premuti
+        in questo istante."""
+        ecodes = self._evdev.ecodes
+        try:
+            for event in self.device.read():
+                if event.type == ecodes.EV_KEY:
+                    if event.value == 1:      # tasto premuto
+                        self._pressed.add(event.code)
+                    elif event.value == 0:    # tasto rilasciato
+                        self._pressed.discard(event.code)
+        except BlockingIOError:
+            pass  # nessun evento pendente in questo frame, normale
+
+    def input_byte(self):
+        """Stessa mappatura di tasti/bit di _run_pygame_loop per
+        pygame.key.get_pressed() (frecce o WASD, J o SPAZIO)."""
+        ecodes = self._evdev.ecodes
+        b = 0
+        if ecodes.KEY_UP in self._pressed or ecodes.KEY_W in self._pressed: b |= 0x01
+        if ecodes.KEY_DOWN in self._pressed or ecodes.KEY_S in self._pressed: b |= 0x02
+        if ecodes.KEY_LEFT in self._pressed or ecodes.KEY_A in self._pressed: b |= 0x04
+        if ecodes.KEY_RIGHT in self._pressed or ecodes.KEY_D in self._pressed: b |= 0x08
+        if ecodes.KEY_J in self._pressed or ecodes.KEY_SPACE in self._pressed: b |= 0x10
+        return b
+
+    def should_quit(self):
+        return self._evdev.ecodes.KEY_ESC in self._pressed
+
+    def close(self):
+        try:
+            self.device.ungrab()
+        except OSError:
+            pass  # gia' rilasciato o device sparito - non fatale in chiusura
+        self.device.close()
 
 
 def _pixels_to_surface(pixels, w, h):
@@ -1123,6 +1217,10 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
     incremental_renderer = IncrementalRenderer(pygame) if renderer_mode == 'dirty-rects' else None
     gpu_renderer = GpuRenderer(pygame, gpu_sdl_renderer) if renderer_mode == 'gpu' else None
     fbdev_renderer = FramebufferRenderer(fbdev_path or "/dev/fb1") if renderer_mode == 'fbdev' else None
+    # EvdevKeyboard SOLO in modalita' interattiva (non --playtest, che
+    # ha gia' la propria sequenza scriptata e non tocca mai la
+    # tastiera vera) - vedi quella classe per il perche' serve qui.
+    evdev_keyboard = EvdevKeyboard() if (renderer_mode == 'fbdev' and not playtest) else None
     audio_player = AudioPlayer(pygame, use_audio, sound_bank=getattr(cpu, 'sound_bank', None))
 
     # cache dello sfondo (percorso 'buffer'): ricalcolato SOLO quando
@@ -1194,6 +1292,11 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
                 break
             current_phase, input_byte = playtest_seq[playtest_i]
             playtest_i += 1
+        elif evdev_keyboard is not None:
+            evdev_keyboard.poll()
+            input_byte = evdev_keyboard.input_byte()
+            if evdev_keyboard.should_quit():
+                running = False
         else:
             keys = pygame.key.get_pressed()
             input_byte = 0
@@ -1375,6 +1478,9 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
 
     if fbdev_renderer is not None:
         fbdev_renderer.close()
+
+    if evdev_keyboard is not None:
+        evdev_keyboard.close()
 
     if quit_pygame_at_end:
         pygame.quit()
