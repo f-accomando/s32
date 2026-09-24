@@ -58,9 +58,29 @@ generato: sia cpu.c che ppu.c superano le 13.000 righe (decine di
 opcode diversi in cpu.py, tutta la logica di compositing/tile/sprite
 in ppu.py), e ci vanno a sbattere ENTRAMBI. fb_convert.c invece resta
 piccolo (una sola funzione, un loop) e compila senza problemi anche
-a -O2. Lo script forza -O0 per cpu.py E ppu.py insieme, lasciando
-fb_convert.py all'ottimizzazione normale - non serve piu' passare
-CFLAGS a mano.
+a -O2.
+
+CFLAGS=-O1 (non -O0) PER CPU.PY/PPU.PY - ESPERIMENTO IN CORSO:
+misurato su Raspberry Pi 1 vero, in condizioni completamente diverse
+tra loro (renderer dirty-rects E --fbdev-renderer, cartuccia asm E
+ConsoleLang, schermata ferma E scroll E combattimento), cpu.run()
+costava SEMPRE ~52-57 microsecondi/istruzione - contro i ~4
+microsecondi/istruzione di un benchmark precedente sullo stesso
+progetto (--benchmark-frames, CPython, anch'esso su Pi 1 vero). Un
+fattore ~12-14x, troppo uniforme per essere l'hardware (temperatura
+normale, throttled=0x0, niente swap, niente build free-threading -
+tutti esclusi) o la fase di gioco (identico a riposo, in scroll e in
+combattimento) - il sospetto forte e' che sia semplicemente il prezzo
+di -O0, MAI potuto verificare finora perche' l'unica alternativa
+provata (nessun CFLAGS, cioe' il default del compilatore, tipicamente
+-O2) e' quello che blocca gcc su questo hardware (vedi sopra). -O1 e'
+un compromesso mai testato prima: recupera spesso gran parte del
+guadagno di -O2 (elimina il boilerplate di conteggio riferimenti/
+controlli di tipo che Cython genera, che -O0 esegue alla lettera)
+restando molto piu' leggero da compilare - potrebbe evitare il blocco
+mantenendo un vantaggio reale a runtime. Se anche questo blocca gcc su
+un dato hardware, si torna a -O0 passando CFLAGS a mano (vedi sotto) -
+nessun danno, e' solo un tentativo.
 
 TRAPPOLE GIA' PRESE (lezioni imparate sul Pi 1 vero):
 1) Prima questo script compilava tutti e tre in un'UNICA chiamata,
@@ -79,11 +99,11 @@ TRAPPOLE GIA' PRESE (lezioni imparate sul Pi 1 vero):
    (fb_convert.py) - una questione di dimensione del sorgente
    generato, non di quale modulo e' piu' importante a runtime.
 
-Se in futuro ANCHE fb_convert.py dovesse bloccarsi a ottimizzazione
-normale su qualche hardware, si puo' comunque forzare CFLAGS a mano
-come prima - un CFLAGS impostato esplicitamente dall'utente ha
-sempre la precedenza su quanto lo script sceglie da solo, per tutti
-e tre i moduli:
+Se -O1 dovesse bloccarsi su qualche hardware (o se in futuro ANCHE
+fb_convert.py dovesse farlo), si puo' comunque forzare CFLAGS a mano -
+un CFLAGS impostato esplicitamente dall'utente ha sempre la
+precedenza su quanto lo script sceglie da solo, per tutti e tre i
+moduli:
 
     CFLAGS="-O0" python3 build_cython.py
 
@@ -170,12 +190,14 @@ def main():
                                               # qui, PRIMA che _build() lo
                                               # tocchi internamente
 
-    print("[1/2] Compilazione cpu.py + ppu.py (CFLAGS=-O0 forzato: entrambi "
-          "generano un .c troppo grande per bloccare gcc a ottimizzazione "
-          "normale su Raspberry Pi 1, vedi il docstring in cima a questo file)")
+    print("[1/2] Compilazione cpu.py + ppu.py (CFLAGS=-O1 forzato: compromesso "
+          "tra velocita' a runtime e rischio di bloccare gcc su hardware debole "
+          "come Raspberry Pi 1 - se questo passo si blocca, ricompila con "
+          "CFLAGS=\"-O0\" python3 build_cython.py, vedi il docstring in cima a "
+          "questo file)")
     _build([Extension(name="cpu", sources=["cpu.py"]),
             Extension(name="ppu", sources=["ppu.py"])],
-           forced_cflags="-O0", user_cflags=user_cflags)
+           forced_cflags="-O1", user_cflags=user_cflags)
 
     print("[2/2] Compilazione fb_convert.py (ottimizzazione normale - file "
           "piccolo, compila senza problemi anche a -O2, e MISURATO che -O0 lo "
