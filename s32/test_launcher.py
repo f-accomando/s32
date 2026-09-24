@@ -1087,6 +1087,71 @@ finally:
     launcher.run_direct = _orig_run_direct_main
 
 # ---------------------------------------------------------------
+# _ticks_to_catch_up (timestep fisso per il gioco locale interattivo):
+# la velocita' di gioco non deve dipendere da quanto ci mette il
+# rendering - vedi _run_pygame_loop per il contesto (segnalato
+# dall'utente su --fbdev-renderer, ma il principio vale in generale).
+# ---------------------------------------------------------------
+from launcher import _ticks_to_catch_up
+
+TICK = 1.0 / 60
+
+n, resid = _ticks_to_catch_up(0.0, TICK, 5)
+check("_ticks_to_catch_up: nessun tempo accumulato -> zero tick", n, 0)
+check("_ticks_to_catch_up: nessun tempo accumulato -> accumulatore invariato", resid, 0.0)
+
+n, resid = _ticks_to_catch_up(TICK * 0.5, TICK, 5)
+check("_ticks_to_catch_up: meno di un tick accumulato -> zero tick", n, 0)
+check("_ticks_to_catch_up: il residuo non consumato resta nell'accumulatore", resid, TICK * 0.5)
+
+n, resid = _ticks_to_catch_up(TICK, TICK, 5)
+check("_ticks_to_catch_up: esattamente un tick -> un tick eseguito", n, 1)
+check("_ticks_to_catch_up: esattamente un tick -> accumulatore azzerato", abs(resid) < 1e-9, True)
+
+n, resid = _ticks_to_catch_up(TICK * 3, TICK, 5)
+check("_ticks_to_catch_up: rendering lento (3 tick di ritardo) -> RECUPERA i 3 tick, non solo 1", n, 3)
+
+n, resid = _ticks_to_catch_up(TICK * 100, TICK, 5)
+check("_ticks_to_catch_up: rendering bloccato a lungo -> tetto MAX_CATCHUP_TICKS, non 100 tick insieme", n, 5)
+check("_ticks_to_catch_up: oltre il tetto, il tempo in eccesso viene SCARTATO (niente spirale della morte)",
+      abs(resid - (TICK * 100 - 5 * TICK)) < 1e-9, True)
+
+# ---------------------------------------------------------------
+# _write_changed_rows (--fbdev-renderer): scrive solo le righe
+# diverse dal frame precedente, per ridurre i byte spediti sull'LCD
+# via SPI - vedi FramebufferRenderer per il contesto (misurato sul
+# Pi 1 vero: la scrittura dell'intero frame ogni volta, anche a
+# sfondo fermo, e' il costo dominante).
+# ---------------------------------------------------------------
+from launcher import _write_changed_rows
+
+ROW = 4  # byte finti per riga, solo per rendere leggibili i test
+N_ROWS = 3
+
+dst_a = bytearray(ROW * N_ROWS)
+out_a = bytearray(b'\x01\x02\x03\x04' b'\x05\x06\x07\x08' b'\x09\x0a\x0b\x0c')
+righe_scritte_a = _write_changed_rows(dst_a, out_a, None, ROW, N_ROWS)
+check("_write_changed_rows: primo frame (prev=None) scrive tutte le righe", righe_scritte_a, N_ROWS)
+check("_write_changed_rows: primo frame - contenuto corretto", bytes(dst_a), bytes(out_a))
+
+# secondo frame IDENTICO al precedente: nessuna riga da riscrivere
+dst_b = bytearray(dst_a)  # simula il framebuffer gia' nello stato del frame precedente
+out_b = bytearray(out_a)  # stesso identico contenuto
+righe_scritte_b = _write_changed_rows(dst_b, out_b, out_a, ROW, N_ROWS)
+check("_write_changed_rows: frame identico -> zero righe riscritte", righe_scritte_b, 0)
+check("_write_changed_rows: frame identico - contenuto invariato", bytes(dst_b), bytes(out_a))
+
+# terzo frame: cambia SOLO la riga di mezzo (indice 1)
+dst_c = bytearray(out_a)  # il framebuffer parte nello stato del frame 'out_a'
+out_c = bytearray(out_a)
+out_c[ROW:ROW*2] = b'\xAA\xBB\xCC\xDD'  # solo la riga 1 cambia
+righe_scritte_c = _write_changed_rows(dst_c, out_c, out_a, ROW, N_ROWS)
+check("_write_changed_rows: solo 1 riga su 3 cambiata -> scrive solo quella", righe_scritte_c, 1)
+check("_write_changed_rows: righe invariate restano quelle di prima", bytes(dst_c), bytes(out_c))
+check("_write_changed_rows: la riga cambiata riflette il nuovo contenuto",
+      bytes(dst_c[ROW:ROW*2]), bytes(b'\xAA\xBB\xCC\xDD'))
+
+# ---------------------------------------------------------------
 # EvdevKeyboard (--fbdev-renderer in modalita' interattiva): finti
 # device evdev, nessun /dev/input reale necessario per i test.
 # ---------------------------------------------------------------
