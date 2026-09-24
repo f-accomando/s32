@@ -116,11 +116,36 @@ TILE_SIZE_PX = 32  # FISSA per l'intera console, non selezionabile per
                     # solo con quanto c'e' disegnato - vedi README.md)
 TILE_BYTES = (TILE_SIZE_PX * TILE_SIZE_PX * BITS_PER_PIXEL) // 8  # 1024 byte/tile
 
-# --- risoluzione schermo: stessa dei modi piu' comuni del vero SNES ---
-SCREEN_W_PX = 480
-SCREEN_H_PX = 320
-SCREEN_TILES_W = SCREEN_W_PX // TILE_SIZE_PX  # 15
-SCREEN_TILES_H = SCREEN_H_PX // TILE_SIZE_PX  # 10
+# --- risoluzione schermo: stessa dei modi piu' comuni del vero SNES.
+# Selezionabile con la variabile d'ambiente S32_SCREEN_MODE PRIMA di
+# lanciare Python (non un flag da riga di comando letto dentro
+# launcher.py: SCREEN_W_PX/H_PX vengono importate da ppu.py/launcher.py
+# come valori semplici (`from memory_map import SCREEN_W_PX`) - quella
+# sintassi COPIA il valore al momento dell'import, che qui avviene
+# molto prima che launcher.py arrivi a leggere i suoi argomenti da
+# riga di comando. Leggerla dall'ambiente, disponibile fin dall'avvio
+# del processo Python, evita il problema - vedi launcher.py per come
+# viene comunque esposta come flag --screen-mode, impostando questa
+# variabile PRIMA dei suoi stessi import in cima al file.
+#
+# "4:3"  -> 320x224 (piu' vicino a molte console retro classiche)
+# "16:9" -> 400x224 (widescreen, stessa altezza del 4:3 - la tilemap
+#           e la logica di scroll verticale restano identiche tra i
+#           due modi, cambia solo quanto e' visibile ai lati)
+# non impostata (default) -> 480x320, il comportamento di sempre
+#
+# NOTA: 400 non e' un multiplo esatto di TILE_SIZE_PX (32) - non e' un
+# problema: render_background_window() gia' taglia i tile parzialmente
+# visibili ai bordi per via dello scroll (vedi li'), lo stesso
+# meccanismo copre anche un bordo destro non allineato ai 32px.
+import os as _os
+_SCREEN_MODES = {
+    "4:3": (320, 224),
+    "16:9": (400, 224),
+}
+SCREEN_W_PX, SCREEN_H_PX = _SCREEN_MODES.get(_os.environ.get("S32_SCREEN_MODE"), (480, 320))
+SCREEN_TILES_W = SCREEN_W_PX // TILE_SIZE_PX  # 15 a 480px, 10 a 320px, 12 (+16px avanzati) a 400px
+SCREEN_TILES_H = SCREEN_H_PX // TILE_SIZE_PX  # 10 a 320px, 7 (+0px avanzati) a 224px
 
 # --- tilemap: molto piu' grande dello schermo (mondo scrollabile in
 # entrambe le direzioni, non solo in verticale come in v1) ---

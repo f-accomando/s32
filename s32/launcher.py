@@ -24,6 +24,22 @@ import os
 import mmap
 import importlib.util
 
+# --screen-mode va intercettato QUI, PRIMA di qualunque import che
+# porti a "from memory_map import SCREEN_W_PX/H_PX" (lang.py e cpu.py
+# sotto lo fanno gia', indirettamente anche ppu.py) - quella sintassi
+# COPIA il valore al momento dell'import, troppo presto per un flag
+# letto dentro parse_flags()/main(). Vedi memory_map.py per il
+# perche' di una variabile d'ambiente invece di un parametro normale.
+# Se il valore manca, non solleviamo nulla qui: parse_flags() (piu'
+# sotto in questo file) vede comunque '--screen-mode' in argv e
+# solleva il consueto LauncherError con un messaggio chiaro - questo
+# blocco al massimo lascia attiva la risoluzione di default per
+# l'istante prima che il programma si fermi comunque su quell'errore.
+if '--screen-mode' in sys.argv:
+    _i = sys.argv.index('--screen-mode')
+    if _i + 1 < len(sys.argv):
+        os.environ['S32_SCREEN_MODE'] = sys.argv[_i + 1]
+
 from assembler import assemble
 from lang import compile_source as compile_consolelang
 from cpu import CPU
@@ -1017,7 +1033,7 @@ def _ticks_to_catch_up(accumulator, tick_dt, max_ticks):
     return n, accumulator
 
 
-def _write_changed_rows(dst, out, prev, row_bytes, n_rows):
+def _write_changed_rows(dst, out, prev, row_bytes, n_rows, dst_row_stride=None, dst_row_offset=0):
     """Scrive in dst (supporta slice assignment - un mmap o un
     bytearray normale, usato cosi' nei test senza bisogno di un vero
     framebuffer) solo le righe di `out` diverse dalla riga
@@ -1025,18 +1041,61 @@ def _write_changed_rows(dst, out, prev, row_bytes, n_rows):
     (row_bytes*n_rows byte totali, riga per riga). Se prev e' None
     (primo frame, niente da confrontare), scrive tutto.
 
+    dst_row_stride/dst_row_offset: per quando dst e' un framebuffer
+    FISICO piu' largo del contenuto logico (bordo nero ai lati/sopra-
+    sotto, vedi FramebufferRenderer con --screen-mode) - dst_row_stride
+    e' quanti byte separano l'inizio di una riga fisica dalla prossima
+    (se diverso da row_bytes), dst_row_offset e' il byte di partenza
+    della prima riga logica dentro il framebuffer fisico (l'angolo in
+    alto a sinistra dell'area di gioco). Di default (entrambi None/0)
+    dst ha lo stesso layout di out/prev, nessun bordo - comportamento
+    identico a prima.
+
     Ritorna il numero di righe effettivamente riscritte - usato dai
     test per verificare che le righe invariate vengano davvero
-    saltate, non solo che il risultato finale sia corretto."""
+    saltate, non solo che il risultato finale sia corretto.
+
+    MISURATO su Raspberry Pi 1 vero: la prima versione di questa
+    funzione confrontava le righe con `out[start:end] != prev[start:end]`
+    - ogni slice su un bytearray/bytes CREA UNA COPIA nuova (960 byte
+    qui), quindi 320 confronti = 320 allocazioni+copie A OGNI FRAME,
+    anche quando NESSUNA riga era cambiata. Su questo hardware
+    lentissimo, quel costo fisso da solo valeva gia' ~200ms/frame -
+    identico che scrivessimo 0 righe o 26, il "risparmio" del
+    dirty-diff veniva mangiato dal costo del confronto stesso.
+    Corretto con due passaggi:
+    1) un confronto dell'INTERO buffer prima di tutto (out == prev,
+       un solo memcmp a livello C su 307KB) - se il frame e' identico
+       al precedente, si esce subito senza toccare le 320 righe (questo
+       confronto e' sul contenuto LOGICO, quindi vale a prescindere dal
+       bordo - un bordo non tocca mai out/prev, solo dove finiscono in dst);
+    2) per il confronto riga per riga (frame DIVERSO da quello
+       precedente), si usano memoryview invece di slice dirette:
+       affettare un memoryview NON copia i dati (crea solo una vista
+       sullo stesso buffer), a differenza di affettare un bytearray."""
+    if dst_row_stride is None:
+        dst_row_stride = row_bytes
+    no_border = dst_row_stride == row_bytes and dst_row_offset == 0
     if prev is None:
-        dst[0:len(out)] = out
+        if no_border:
+            dst[0:len(out)] = out
+        else:
+            for y in range(n_rows):
+                s = y * row_bytes
+                d = y * dst_row_stride + dst_row_offset
+                dst[d:d + row_bytes] = out[s:s + row_bytes]
         return n_rows
+    if out == prev:
+        return 0
+    out_mv = memoryview(out)
+    prev_mv = memoryview(prev)
     written = 0
     for y in range(n_rows):
         start = y * row_bytes
         end = start + row_bytes
-        if out[start:end] != prev[start:end]:
-            dst[start:end] = out[start:end]
+        if out_mv[start:end] != prev_mv[start:end]:
+            d = y * dst_row_stride + dst_row_offset
+            dst[d:d + row_bytes] = out_mv[start:end]
             written += 1
     return written
 
@@ -1090,20 +1149,60 @@ class FramebufferRenderer:
     qui sia (si spera, dato che il driver traccia le pagine toccate)
     il traffico SPI reale. Durante lo scroll (quasi tutte le righe
     cambiano comunque) il guadagno si riduce, ma non peggiora mai
-    rispetto a riscrivere sempre tutto."""
+    rispetto a riscrivere sempre tutto.
+
+    --screen-mode ('4:3'/'16:9', vedi memory_map.py) rende la
+    risoluzione LOGICA della console (SCREEN_W_PX/H_PX) piu' piccola
+    di questo LCD fisico (480x320, LCD_PHYSICAL_W/H sotto - specifico
+    di questo pannello, non ricavabile da SCREEN_W_PX/H_PX una volta
+    che quelle possono valere meno). L'immagine di gioco viene
+    centrata nel framebuffer fisico, con un bordo NERO intorno -
+    NESSUNO scaling (deciso apposta con l'utente: scalare per
+    riempire il pannello annullerebbe il beneficio principale di una
+    risoluzione piu' bassa, che e' spedire MENO byte sull'SPI, non
+    solo comporre meno pixel). Il bordo si scrive una volta sola
+    all'avvio (resta nero per tutta la sessione, non tocca mai i byte
+    fuori dall'area di gioco); ogni frame successivo aggiorna solo il
+    rettangolo attivo, con lo stesso dirty-diff riga per riga di
+    sempre (vedi _write_changed_rows)."""
+
+    LCD_PHYSICAL_W = 480  # dimensione REALE di questo pannello - fissa,
+    LCD_PHYSICAL_H = 320  # indipendente dalla risoluzione scelta per la console
 
     def __init__(self, fb_path="/dev/fb1"):
         self.fb_path = fb_path
         self.fb = open(fb_path, "r+b")
-        self._fb_size = SCREEN_W_PX * SCREEN_H_PX * 2  # RGB565, 2 byte/pixel
+        self._phys_w = self.LCD_PHYSICAL_W
+        self._phys_h = self.LCD_PHYSICAL_H
+        self._fb_size = self._phys_w * self._phys_h * 2  # RGB565, 2 byte/pixel
         self._mmap = mmap.mmap(self.fb.fileno(), self._fb_size)
         self._prev_rgb565 = None  # ultimo frame scritto - None al primo
                                    # frame, forza la scrittura intera
+        self.last_rows_written = 0  # diagnostica --stats: quante righe (su
+                                     # SCREEN_H_PX) sono state davvero
+                                     # riscritte nell'ultimo render()
+
+        off_x = (self._phys_w - SCREEN_W_PX) // 2
+        off_y = (self._phys_h - SCREEN_H_PX) // 2
+        self._dst_row_stride = self._phys_w * 2
+        self._dst_row_offset = off_y * self._dst_row_stride + off_x * 2
+        self._has_border = off_x != 0 or off_y != 0
+        if self._has_border:
+            self._mmap[0:self._fb_size] = bytes(self._fb_size)  # nero (0x0000
+                                                                   # in RGB565) -
+                                                                   # una volta
+                                                                   # sola, resta
+                                                                   # cosi' per
+                                                                   # tutta la
+                                                                   # sessione
 
     def render(self, frame_buf):
         out = rgb888_to_rgb565(frame_buf)
         row_bytes = SCREEN_W_PX * 2
-        _write_changed_rows(self._mmap, out, self._prev_rgb565, row_bytes, SCREEN_H_PX)
+        self.last_rows_written = _write_changed_rows(
+            self._mmap, out, self._prev_rgb565, row_bytes, SCREEN_H_PX,
+            dst_row_stride=self._dst_row_stride, dst_row_offset=self._dst_row_offset,
+        )
         self._prev_rgb565 = out
 
     def close(self):
@@ -1561,10 +1660,13 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
                 label = renderer_mode.ljust(11)
                 istr_medie = stats.get('istruzioni', 0) / n
                 istr_max = stats.get('istruzioni_max', 0)
+                righe_info = ""
+                if fbdev_renderer is not None:
+                    righe_info = f" | righe riscritte: {fbdev_renderer.last_rows_written}/{SCREEN_H_PX}"
                 print(f"[{label}] fps={n} | cpu={stats['cpu']/n*1000:.1f}ms "
                       f"render+blit={stats['render']/n*1000:.1f}ms "
                       f"totale={( stats['cpu']+stats['render'] )/n*1000:.1f}ms/frame "
-                      f"| istruzioni: media={istr_medie:.0f} max={istr_max}")
+                      f"| istruzioni: media={istr_medie:.0f} max={istr_max}{righe_info}")
                 sn = stats.get('scroll_frames', 0)
                 if sn:
                     parts = ' '.join(
@@ -1826,16 +1928,25 @@ def parse_flags(argv):
     """Estrae i flag di prestazioni (--stats, --benchmark,
     --benchmark-frames, --profile, --surface-renderer,
     --buffer-renderer, --gpu-renderer, --fbdev-renderer, --fbdev-path,
-    --fullscreen, --no-audio, --playtest, --playtest-quick,
-    --netplay-host, --netplay-join) da argv, ritornando
-    (argv_ripulito, dict_flag) - separato da determine_mode() apposta,
-    per restare entrambi testabili singolarmente.
+    --screen-mode, --fullscreen, --no-audio, --playtest,
+    --playtest-quick, --netplay-host, --netplay-join) da argv,
+    ritornando (argv_ripulito, dict_flag) - separato da
+    determine_mode() apposta, per restare entrambi testabili
+    singolarmente.
 
     --fbdev-renderer scrive direttamente su un framebuffer Linux
     invece di usare SDL per l'output video (vedi FramebufferRenderer) -
     utile quando nessun driver SDL2 reale e' disponibile (es. Pi 1
     headless senza /dev/dri). --fbdev-path <path> cambia il device di
     default (/dev/fb1).
+
+    --screen-mode '4:3'/'16:9' riduce la risoluzione logica della
+    console (vedi memory_map.py) - il suo VALORE va gia' letto e
+    applicato PRIMA di questa funzione (blocco in cima a questo file,
+    prima degli import pesanti), qui viene solo tolto da argv e
+    validato di nuovo per dare un errore chiaro a chi chiama
+    parse_flags() direttamente (es. i test) senza passare da quel
+    blocco iniziale.
 
     --benchmark-frames <N> cambia quanti frame misura --benchmark
     (default 120, vedi run_benchmark()) - serve per confrontare
@@ -1900,6 +2011,18 @@ def parse_flags(argv):
             if i + 1 >= len(argv):
                 raise LauncherError('--fbdev-path richiede un argomento: <path>, es. /dev/fb1')
             flags['fbdev_path'] = argv[i+1]
+            i += 1
+        elif arg == '--screen-mode':
+            # il VALORE e' gia' stato applicato (variabile d'ambiente
+            # S32_SCREEN_MODE) PRIMA degli import in cima a questo file -
+            # vedi li' per il perche'. Qui lo consumiamo solo per
+            # toglierlo da argv (altrimenti finirebbe scambiato per un
+            # percorso di cartuccia da determine_mode()) e per dare un
+            # errore chiaro se il valore non e' uno dei due riconosciuti.
+            if i + 1 >= len(argv):
+                raise LauncherError("--screen-mode richiede un argomento: '4:3' o '16:9'")
+            if argv[i+1] not in ('4:3', '16:9'):
+                raise LauncherError(f"--screen-mode: valore non riconosciuto \"{argv[i+1]}\" (usa '4:3' o '16:9')")
             i += 1
         elif arg == '--fullscreen':
             flags['fullscreen'] = True

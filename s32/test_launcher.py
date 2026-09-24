@@ -258,6 +258,29 @@ try:
 except LauncherError:
     check("--fbdev-path senza argomento: solleva LauncherError come atteso", True, True)
 
+# --screen-mode: il VALORE va gia' applicato prima di parse_flags() (vedi
+# il blocco in cima a launcher.py), qui verifichiamo solo che venga
+# rimosso da argv e validato di nuovo (vedi docstring di parse_flags).
+rest4n, flags4n = parse_flags(['launcher.py', 'gioco.py', '--screen-mode', '4:3'])
+check("--screen-mode '4:3': rimosso da argv insieme al suo valore", rest4n, ['launcher.py', 'gioco.py'])
+check("--screen-mode: non aggiunge una chiave al dict flags (valore gia' in ambiente)",
+      'screen_mode' in flags4n, False)
+
+rest4o, flags4o = parse_flags(['launcher.py', 'gioco.py', '--screen-mode', '16:9'])
+check("--screen-mode '16:9': rimosso da argv insieme al suo valore", rest4o, ['launcher.py', 'gioco.py'])
+
+try:
+    parse_flags(['launcher.py', 'gioco.py', '--screen-mode'])
+    check("--screen-mode senza argomento: solleva LauncherError come atteso", False, True)
+except LauncherError:
+    check("--screen-mode senza argomento: solleva LauncherError come atteso", True, True)
+
+try:
+    parse_flags(['launcher.py', 'gioco.py', '--screen-mode', 'bogus'])
+    check("--screen-mode con valore non riconosciuto: solleva LauncherError come atteso", False, True)
+except LauncherError:
+    check("--screen-mode con valore non riconosciuto: solleva LauncherError come atteso", True, True)
+
 # ---------------------------------------------------------------
 # --netplay-host / --netplay-join: consumano 2 argomenti SUCCESSIVI
 # (porta+num_giocatori, o ip+porta) - a differenza di tutti gli
@@ -1150,6 +1173,49 @@ check("_write_changed_rows: solo 1 riga su 3 cambiata -> scrive solo quella", ri
 check("_write_changed_rows: righe invariate restano quelle di prima", bytes(dst_c), bytes(out_c))
 check("_write_changed_rows: la riga cambiata riflette il nuovo contenuto",
       bytes(dst_c[ROW:ROW*2]), bytes(b'\xAA\xBB\xCC\xDD'))
+
+# ---------------------------------------------------------------
+# _write_changed_rows con dst_row_stride/dst_row_offset (--screen-mode
+# su LCD fisico piu' grande della risoluzione logica, vedi
+# FramebufferRenderer): il frame logico (2 righe x 4 byte) deve finire
+# CENTRATO dentro un framebuffer fisico piu' largo (4 righe x 8 byte),
+# senza mai toccare il bordo.
+# ---------------------------------------------------------------
+PHYS_ROW = 8   # byte per riga del framebuffer FISICO
+PHYS_ROWS = 4  # righe del framebuffer FISICO
+LOG_ROW = 4    # byte per riga del frame LOGICO (piu' piccolo)
+LOG_ROWS = 2
+OFF_X_BYTES = 2  # bordo di 1 pixel (2 byte) a sinistra/destra
+OFF_Y = 1        # bordo di 1 riga sopra/sotto
+DST_OFFSET = OFF_Y * PHYS_ROW + OFF_X_BYTES
+
+bordo_nero = bytes(PHYS_ROW * PHYS_ROWS)
+dst_border_a = bytearray(bordo_nero)  # simula il bordo gia' scritto una volta all'avvio
+out_border_a = bytearray(b'\x01\x02\x03\x04' b'\x05\x06\x07\x08')
+righe_border_a = _write_changed_rows(
+    dst_border_a, out_border_a, None, LOG_ROW, LOG_ROWS,
+    dst_row_stride=PHYS_ROW, dst_row_offset=DST_OFFSET,
+)
+check("_write_changed_rows con bordo: primo frame scrive tutte le righe logiche", righe_border_a, LOG_ROWS)
+atteso_a = bytearray(bordo_nero)
+atteso_a[DST_OFFSET:DST_OFFSET + LOG_ROW] = out_border_a[0:LOG_ROW]
+atteso_a[DST_OFFSET + PHYS_ROW:DST_OFFSET + PHYS_ROW + LOG_ROW] = out_border_a[LOG_ROW:LOG_ROW*2]
+check("_write_changed_rows con bordo: area attiva centrata correttamente, bordo intatto",
+      bytes(dst_border_a), bytes(atteso_a))
+
+# secondo frame: cambia solo la riga logica 0 -> il bordo non deve
+# MAI essere toccato di nuovo, solo la riga attiva corrispondente
+dst_border_b = bytearray(atteso_a)
+out_border_b = bytearray(out_border_a)
+out_border_b[0:LOG_ROW] = b'\xAA\xBB\xCC\xDD'
+righe_border_b = _write_changed_rows(
+    dst_border_b, out_border_b, out_border_a, LOG_ROW, LOG_ROWS,
+    dst_row_stride=PHYS_ROW, dst_row_offset=DST_OFFSET,
+)
+check("_write_changed_rows con bordo: solo 1 riga logica cambiata -> scrive solo quella", righe_border_b, 1)
+atteso_b = bytearray(atteso_a)
+atteso_b[DST_OFFSET:DST_OFFSET + LOG_ROW] = b'\xAA\xBB\xCC\xDD'
+check("_write_changed_rows con bordo: bordo ancora intatto dopo l'update", bytes(dst_border_b), bytes(atteso_b))
 
 # ---------------------------------------------------------------
 # EvdevKeyboard (--fbdev-renderer in modalita' interattiva): finti
