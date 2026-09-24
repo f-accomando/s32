@@ -20,3 +20,10 @@ s32/fb_convert*.so
 s32/fb_convert.c
 s32/build/
 s32/build_cython_tmp/
+
+# artefatti generati dagli strumenti di confronto cpu.py/cpu.lua
+# (dump_cpu_state.py, verify_cpu_lua.py) - binari rigenerabili in un
+# comando, specifici della cartuccia/programma usato per l'ultimo
+# confronto, non hanno senso nel repository
+s32/cpu_bench_mem.bin
+s32/cpu_lua_coverage_test.rom
