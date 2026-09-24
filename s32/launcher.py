@@ -1099,11 +1099,14 @@ class FramebufferRenderer:
         self._mmap = mmap.mmap(self.fb.fileno(), self._fb_size)
         self._prev_rgb565 = None  # ultimo frame scritto - None al primo
                                    # frame, forza la scrittura intera
+        self.last_rows_written = 0  # diagnostica --stats: quante righe (su
+                                     # SCREEN_H_PX) sono state davvero
+                                     # riscritte nell'ultimo render()
 
     def render(self, frame_buf):
         out = rgb888_to_rgb565(frame_buf)
         row_bytes = SCREEN_W_PX * 2
-        _write_changed_rows(self._mmap, out, self._prev_rgb565, row_bytes, SCREEN_H_PX)
+        self.last_rows_written = _write_changed_rows(self._mmap, out, self._prev_rgb565, row_bytes, SCREEN_H_PX)
         self._prev_rgb565 = out
 
     def close(self):
@@ -1561,10 +1564,13 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
                 label = renderer_mode.ljust(11)
                 istr_medie = stats.get('istruzioni', 0) / n
                 istr_max = stats.get('istruzioni_max', 0)
+                righe_info = ""
+                if fbdev_renderer is not None:
+                    righe_info = f" | righe riscritte: {fbdev_renderer.last_rows_written}/{SCREEN_H_PX}"
                 print(f"[{label}] fps={n} | cpu={stats['cpu']/n*1000:.1f}ms "
                       f"render+blit={stats['render']/n*1000:.1f}ms "
                       f"totale={( stats['cpu']+stats['render'] )/n*1000:.1f}ms/frame "
-                      f"| istruzioni: media={istr_medie:.0f} max={istr_max}")
+                      f"| istruzioni: media={istr_medie:.0f} max={istr_max}{righe_info}")
                 sn = stats.get('scroll_frames', 0)
                 if sn:
                     parts = ' '.join(
