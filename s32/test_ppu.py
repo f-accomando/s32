@@ -351,8 +351,6 @@ check("render_background_window: scroll_y+offset equivalenti danno lo stesso ris
 # fix del costo dominante trovato sulla Raspberry Pi 1 durante lo
 # scroll (57ms/frame senza, vedi launcher.py)
 # ---------------------------------------------------------------
-import ppu as ppu_module
-
 vram12 = new_vram()
 cgram12 = new_cgram()
 write_tile(vram12, 1, solid_tile(1))
@@ -361,36 +359,41 @@ for tx in range(15):
     write_tilemap(vram12, tx, 0, tile_index=1, palette=0)
     write_tilemap(vram12, tx, 1, tile_index=1, palette=0)
 
-original_decode_tile = ppu_module.decode_tile
-call_count = [0]
+key = (1, 0)  # (tile_index, palette) scritti sopra
 
-def counting_decode_tile(vram, tile_index):
-    call_count[0] += 1
-    return original_decode_tile(vram, tile_index)
+# Verifica per IDENTITA' dell'oggetto blob, non per conteggio delle
+# chiamate a decode_tile: con l'estensione Cython compilata, get_tile()
+# chiama decode_tile() con una chiamata C diretta interna al modulo
+# (ottimizzazione normale di Cython per funzioni cpdef nello stesso
+# modulo) - un monkeypatch su ppu.decode_tile non la intercetta piu',
+# quindi quel tipo di verifica darebbe 0 chiamate sia con hit che con
+# miss. L'identita' dell'oggetto e' il contratto vero di get_tile_blob
+# ("stesso blob se in cache, nuovo se no") ed e' verificabile a
+# prescindere da come la chiamata interna e' compilata.
 
-ppu_module.decode_tile = counting_decode_tile
-try:
-    # SENZA cache condivisa: 5 chiamate separate, ognuna ricostruisce
-    call_count[0] = 0
-    for _ in range(5):
-        render_background_window(vram12, cgram12, 0, 0, 0, 2)
-    calls_without_cache = call_count[0]
+# SENZA cache condivisa: un dict NUOVO a ogni chiamata (esplicito,
+# cosi' da poterlo ispezionare) - ogni chiamata ricostruisce il blob
+# da zero, quindi 5 chiamate producono 5 OGGETTI blob distinti
+blobs_without_cache = []
+for _ in range(5):
+    fresh = {}
+    render_background_window(vram12, cgram12, 0, 0, 0, 2, blob_cache=fresh)
+    blobs_without_cache.append(fresh[key])
 
-    # CON cache condivisa tra le chiamate: decodificato una volta sola
-    call_count[0] = 0
-    shared = {}
-    for _ in range(5):
-        render_background_window(vram12, cgram12, 0, 0, 0, 2, blob_cache=shared)
-    calls_with_cache = call_count[0]
-finally:
-    ppu_module.decode_tile = original_decode_tile
+# CON cache condivisa tra le chiamate: dalla seconda chiamata in poi
+# viene RIUSATO lo stesso oggetto blob, mai ricostruito
+shared = {}
+blobs_with_cache = []
+for _ in range(5):
+    render_background_window(vram12, cgram12, 0, 0, 0, 2, blob_cache=shared)
+    blobs_with_cache.append(shared[key])
 
-check("blob_cache: senza cache condivisa, decode_tile chiamata ogni volta",
-      calls_without_cache > 0, True)
-check("blob_cache: CON cache condivisa, decode_tile chiamata MOLTE MENO volte",
-      calls_with_cache < calls_without_cache, True)
-check("blob_cache: con cache condivisa, decode_tile chiamata esattamente 1 volta (5 chiamate, 1 tile distinto)",
-      calls_with_cache, 1)
+check("blob_cache: senza cache condivisa, ogni chiamata ricostruisce un blob diverso (5 oggetti distinti)",
+      len({id(b) for b in blobs_without_cache}), 5)
+check("blob_cache: CON cache condivisa, e' sempre lo STESSO oggetto blob (nessuna ricostruzione)",
+      len({id(b) for b in blobs_with_cache}), 1)
+check("blob_cache: con cache condivisa, contiene esattamente 1 entry (1 tile+palette distinti)",
+      len(shared), 1)
 
 print()
 if fails == 0:
