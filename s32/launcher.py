@@ -21,6 +21,7 @@ per la prima, questo file resta un sottile collante per la seconda).
 
 import sys
 import os
+import mmap
 import importlib.util
 
 from assembler import assemble
@@ -1025,19 +1026,33 @@ class FramebufferRenderer:
     `fbset -fb /dev/fb1`) in fb_convert.py, compilato con Cython come
     cpu.py/ppu.py (vedi quel modulo) - MISURATO su Raspberry Pi 1
     vero in Python puro: ~4 SECONDI/frame (153.600 pixel/frame),
-    completamente inutilizzabile senza compilarlo."""
+    completamente inutilizzabile senza compilarlo.
+
+    SCRITTURA VIA mmap, NON write(): molti driver SPI per LCD piccoli
+    (framework 'fbtft', es. fb_ili9486 - identificato con l'utente via
+    dmesg: SPI a 16MHz, parametri fps=33/txbuflen=32768, la firma
+    tipica del deferred I/O di fbtft) spediscono i dati sul bus SPI in
+    un thread del KERNEL separato, innescato tracciando le pagine
+    "sporche" della memoria MAPPATA (mmap) - non degli scritture dirette
+    col syscall write(). Con write(), misurato ~200ms/frame bloccanti
+    (~1.5 MB/s, il limite fisico dell'SPI a 16MHz con l'overhead del
+    protocollo) - con mmap, la scrittura qui e' solo un memcpy in
+    memoria, il trasferimento SPI vero avviene in background al ritmo
+    che il driver decide (fps=33 in questo caso), fuori dal loop di
+    gioco."""
 
     def __init__(self, fb_path="/dev/fb1"):
         self.fb_path = fb_path
         self.fb = open(fb_path, "r+b")
+        self._fb_size = SCREEN_W_PX * SCREEN_H_PX * 2  # RGB565, 2 byte/pixel
+        self._mmap = mmap.mmap(self.fb.fileno(), self._fb_size)
 
     def render(self, frame_buf):
         out = rgb888_to_rgb565(frame_buf)
-        self.fb.seek(0)
-        self.fb.write(out)
-        self.fb.flush()
+        self._mmap[0:len(out)] = out
 
     def close(self):
+        self._mmap.close()
         self.fb.close()
 
 
