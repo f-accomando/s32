@@ -47,13 +47,30 @@ cosa da controllare e' se esiste un .so compilato in questa cartella
 (`ls s32/cpu*.so s32/ppu*.so`) - se si', ricompilare o cancellarlo.
 
 SU RASPBERRY PI 1 (ARMv6, RAM limitata): il -O2 di default puo'
-far si' che il processo gcc che compila cpu.c/ppu.c termini senza
-produrre il .so e senza un errore chiaro nel log (osservato senza
-traccia di OOM kill in dmesg - probabilmente solo troppo oneroso per
-la CPU/RAM disponibili su questo modello). Se succede, ricompilare
-con ottimizzazione piu' bassa risolve, a costo di poco (il guadagno
-di Cython viene soprattutto dalla tipizzazione statica in
-cpu.pxd/ppu.pxd, non da -O2):
+far si' che il processo gcc che compila cpu.c termini senza produrre
+il .so e senza un errore chiaro nel log (osservato senza traccia di
+OOM kill in dmesg - probabilmente solo troppo oneroso per la CPU/RAM
+disponibili su questo modello, dato che cpu.c e' un file C enorme -
+decine di opcode diversi). Lo script COMPILA cpu.py SEPARATAMENTE
+dagli altri due, forzando -O0 automaticamente per lui SOLO - non
+serve piu' passare CFLAGS a mano.
+
+TRAPPOLA GIA' PRESA UNA VOLTA (lezione imparata sul Pi 1 vero):
+prima questo script compilava cpu.py/ppu.py/fb_convert.py in
+un'UNICA chiamata, quindi un CFLAGS="-O0" messo per far compilare
+cpu.py si applicava ANCHE a ppu.py e fb_convert.py - file piccoli che
+non ne avevano affatto bisogno, e -O0 li rendeva inutilmente lenti a
+RUNTIME (misurato: fb_convert.py passava da ~0.3ms a 129ms/frame per
+la stessa conversione, un fattore 400x solo per l'ottimizzazione
+sbagliata). Separare le chiamate risolve entrambi i problemi: cpu.py
+resta sicuro da compilare, ppu.py/fb_convert.py compilano piu' in
+fretta E girano alla velocita' che ci si aspetta.
+
+Se in futuro ANCHE ppu.py o fb_convert.py dovessero bloccarsi a
+ottimizzazione normale su qualche hardware, si puo' comunque forzare
+CFLAGS a mano come prima - un CFLAGS impostato esplicitamente
+dall'utente ha sempre la precedenza su quanto lo script sceglie da
+solo, per tutti e tre i moduli:
 
     CFLAGS="-O0" python3 build_cython.py
 
@@ -70,51 +87,88 @@ from setuptools import Extension, setup
 from Cython.Build import cythonize
 
 
+COMPILER_DIRECTIVES = {
+    "language_level": "3",
+    "boundscheck": False,   # niente controllo limiti su mem[i] -
+                             # gia' garantito dai mask (& 0xffffff)
+                             # applicati prima di ogni accesso in
+                             # cpu.py; in ppu.py sono solo oggetti
+                             # Python normali (bytearray/list), non
+                             # buffer/memoryview C - la direttiva
+                             # non ha alcun effetto li'; in
+                             # fb_convert.py invece SI applica
+                             # davvero (frame_buf e' un memoryview
+                             # tipizzato, vedi fb_convert.pxd) - il
+                             # loop resta sempre dentro len(frame_buf)
+                             # per costruzione (range(0, n, 3))
+    "wraparound": False,    # nessun indice negativo usato in cpu.py/ppu.py/fb_convert.py
+    "infer_types": True,    # tipizza automaticamente le variabili
+                             # locali dove il compilatore puo'
+                             # dedurlo con certezza (es. risultati
+                             # intermedi in _add/_sub, gli indici
+                             # riga/colonna in ppu.py, o r/g/b/p in
+                             # fb_convert.py) - senza dover annotare
+                             # i .py a mano
+}
+
+
+def _build(ext_modules, forced_cflags, user_cflags):
+    """Compila ext_modules con CFLAGS controllato: se l'utente ne ha
+    impostato uno esplicitamente (user_cflags, letto UNA VOLTA in
+    main() prima di ogni chiamata - non ri-letto qui, altrimenti la
+    prima _build() che lo forza lo "sporcherebbe" per quelle dopo)
+    quello vince sempre; altrimenti si usa forced_cflags (puo' essere
+    None per lasciare l'ottimizzazione di default del compilatore)."""
+    prev = os.environ.get("CFLAGS")
+    chosen = user_cflags if user_cflags is not None else forced_cflags
+    if chosen is None:
+        os.environ.pop("CFLAGS", None)
+    else:
+        os.environ["CFLAGS"] = chosen
+    try:
+        setup(
+            ext_modules=cythonize(
+                ext_modules,
+                compiler_directives=COMPILER_DIRECTIVES,
+                build_dir="build_cython_tmp",  # file .c intermedi - non i .so
+                                                # finali, che restano accanto ai
+                                                # rispettivi .py per essere trovati
+                                                # dall'import
+                force=True,
+            ),
+            script_args=["build_ext", "--inplace"],
+        )
+    finally:
+        if prev is None:
+            os.environ.pop("CFLAGS", None)
+        else:
+            os.environ["CFLAGS"] = prev
+
+
 def main():
     os.chdir(os.path.dirname(os.path.abspath(__file__)))  # sempre relativo
                                                             # a questo file,
                                                             # non alla
                                                             # cartella da cui
                                                             # viene lanciato
-    ext_modules = [
-        Extension(name="cpu", sources=["cpu.py"]),
-        Extension(name="ppu", sources=["ppu.py"]),
-        Extension(name="fb_convert", sources=["fb_convert.py"]),
-    ]
-    setup(
-        ext_modules=cythonize(
-            ext_modules,
-            compiler_directives={
-                "language_level": "3",
-                "boundscheck": False,   # niente controllo limiti su mem[i] -
-                                         # gia' garantito dai mask (& 0xffffff)
-                                         # applicati prima di ogni accesso in
-                                         # cpu.py; in ppu.py sono solo oggetti
-                                         # Python normali (bytearray/list), non
-                                         # buffer/memoryview C - la direttiva
-                                         # non ha alcun effetto li'; in
-                                         # fb_convert.py invece SI applica
-                                         # davvero (frame_buf e' un memoryview
-                                         # tipizzato, vedi fb_convert.pxd) - il
-                                         # loop resta sempre dentro len(frame_buf)
-                                         # per costruzione (range(0, n, 3))
-                "wraparound": False,    # nessun indice negativo usato in cpu.py/ppu.py/fb_convert.py
-                "infer_types": True,    # tipizza automaticamente le variabili
-                                         # locali dove il compilatore puo'
-                                         # dedurlo con certezza (es. risultati
-                                         # intermedi in _add/_sub, gli indici
-                                         # riga/colonna in ppu.py, o r/g/b/p in
-                                         # fb_convert.py) - senza dover annotare
-                                         # i .py a mano
-            },
-            build_dir="build_cython_tmp",  # file .c intermedi - non i .so
-                                            # finali, che restano accanto ai
-                                            # rispettivi .py per essere trovati
-                                            # dall'import
-            force=True,
-        ),
-        script_args=["build_ext", "--inplace"],
-    )
+    user_cflags = os.environ.get("CFLAGS")  # se impostato esplicitamente,
+                                              # vince sempre su tutto (vedi
+                                              # _build) - letto una volta sola
+                                              # qui, PRIMA che _build() lo
+                                              # tocchi internamente
+
+    print("[1/2] Compilazione cpu.py (CFLAGS=-O0 forzato: e' l'unico file "
+          "abbastanza grande da bloccare gcc a ottimizzazione normale su "
+          "Raspberry Pi 1, vedi il docstring in cima a questo file)")
+    _build([Extension(name="cpu", sources=["cpu.py"])], forced_cflags="-O0", user_cflags=user_cflags)
+
+    print("[2/2] Compilazione ppu.py + fb_convert.py (ottimizzazione normale - "
+          "file piu' piccoli, MISURATO che -O0 li rende inutilmente lenti a "
+          "runtime senza bisogno reale di evitare -O2)")
+    _build([Extension(name="ppu", sources=["ppu.py"]),
+            Extension(name="fb_convert", sources=["fb_convert.py"])],
+           forced_cflags=None, user_cflags=user_cflags)
+
     print()
     print("Compilazione completata - cerca i file cpu.*.so, ppu.*.so e fb_convert.*.so in questa cartella.")
     print("Verifica: python3 -c \"import cpu, ppu, fb_convert; print(cpu.__file__, ppu.__file__, fb_convert.__file__)\" deve mostrare .so per tutti e tre, non .py")
