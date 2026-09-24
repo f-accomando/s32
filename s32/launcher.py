@@ -1824,7 +1824,16 @@ def run_benchmark(path, kind, n_frames=120, profile=False):
     profile=True usa cProfile per mostrare il tempo speso in OGNI
     funzione (non solo il totale cpu.run()/render_frame()) - utile
     quando i numeri aggregati non spiegano da soli dove va il tempo
-    su un hardware specifico (vedi caso Raspberry Pi 1 in README.md)."""
+    su un hardware specifico (vedi caso Raspberry Pi 1 in README.md).
+
+    ATTENZIONE: chiama cpu.run() con input_byte=0 SEMPRE (nessun input
+    scriptato) - se la cartuccia resta su una schermata "a riposo"
+    (es. titolo) senza input, il profilo misura QUELLA fase, non il
+    gameplay vero (movimento/scroll/collisioni), che spesso esegue
+    molte piu' istruzioni/frame. Per profilare il gameplay vero serve
+    combinare --profile con --playtest (vedi main(): in quel caso il
+    profiling avvolge l'intero loop interattivo/scriptato invece di
+    passare da qui)."""
     import time
     import resource
 
@@ -2073,7 +2082,18 @@ def main():
         run_os_menu()
     else:
         _, path, kind = mode
-        if flags['benchmark'] or flags['profile']:
+        # --profile SENZA --playtest usa il benchmark sintetico (vedi
+        # run_benchmark - niente rendering vero, input_byte=0 sempre,
+        # quindi resta su una fase "a riposo"). --profile CON --playtest
+        # invece avvolge l'intero loop interattivo/scriptato vero (con
+        # il renderer scelto, es. --fbdev-renderer) in cProfile, perche'
+        # e' l'UNICO modo di catturare il costo reale di cpu.run() sotto
+        # il carico vero (movimento/scroll/collisioni) che la fase "a
+        # riposo" non esercita mai - richiesto dopo aver visto su
+        # Raspberry Pi 1 vero cpu=80-110ms/frame durante il gameplay
+        # scriptato, contro numeri molto piu' bassi attesi dal benchmark
+        # sintetico su una scena statica.
+        if flags['benchmark'] or (flags['profile'] and not flags['playtest']):
             run_benchmark(path, kind, n_frames=flags['benchmark_frames'] or 120, profile=flags['profile'])
         else:
             netcode_session = None
@@ -2094,11 +2114,29 @@ def main():
                 print(f"[netplay] impossibile avviare la partita in rete: {exc}")
                 sys.exit(1)
 
-            run_direct(path, kind, show_stats=flags['stats'], renderer_mode=flags['renderer'],
-                       fullscreen=flags['fullscreen'], use_audio=flags['audio'], playtest=flags['playtest'],
-                       playtest_quick=flags['playtest_quick'],
-                       netcode_session=netcode_session, local_player_index=local_player_index,
-                       fbdev_path=flags['fbdev_path'])
+            if flags['profile']:
+                import cProfile
+                import pstats
+
+                profiler = cProfile.Profile()
+                profiler.enable()
+                run_direct(path, kind, show_stats=flags['stats'], renderer_mode=flags['renderer'],
+                           fullscreen=flags['fullscreen'], use_audio=flags['audio'], playtest=flags['playtest'],
+                           playtest_quick=flags['playtest_quick'],
+                           netcode_session=netcode_session, local_player_index=local_player_index,
+                           fbdev_path=flags['fbdev_path'])
+                profiler.disable()
+
+                print(f"--- profilo dettagliato (playtest): {path} ---")
+                stats = pstats.Stats(profiler)
+                stats.sort_stats('cumulative')
+                stats.print_stats(30)
+            else:
+                run_direct(path, kind, show_stats=flags['stats'], renderer_mode=flags['renderer'],
+                           fullscreen=flags['fullscreen'], use_audio=flags['audio'], playtest=flags['playtest'],
+                           playtest_quick=flags['playtest_quick'],
+                           netcode_session=netcode_session, local_player_index=local_player_index,
+                           fbdev_path=flags['fbdev_path'])
 
 
 if __name__ == '__main__':
