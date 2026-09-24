@@ -1,9 +1,9 @@
-"""build_cython.py - compila cpu.py E ppu.py in estensioni native con
-Cython (issue #22: PyPy da' un guadagno reale ma richiede riscaldarsi
-per minuti ad ogni avvio e rompe la build di pygame - vedi
-doc_networking.md/README.md per i dettagli. Cython compila in
-anticipo: nessun riscaldamento, nessuna modifica all'interprete usato
-per pygame, che resta CPython normale.
+"""build_cython.py - compila cpu.py, ppu.py E fb_convert.py in
+estensioni native con Cython (issue #22: PyPy da' un guadagno reale
+ma richiede riscaldarsi per minuti ad ogni avvio e rompe la build di
+pygame - vedi doc_networking.md/README.md per i dettagli. Cython
+compila in anticipo: nessun riscaldamento, nessuna modifica
+all'interprete usato per pygame, che resta CPython normale.
 
 ppu.py compilato per lo stesso motivo di cpu.py sotto, non perche'
 "tanto vale" - un profilo vero (--profile, sia su x86 che su
@@ -11,10 +11,16 @@ Raspberry Pi 1) mostra che il rendering (ppu.py) pesa il ~64% del
 tempo per frame contro il ~2% della CPU: e' il bersaglio con la leva
 maggiore, non un'aggiunta simmetrica per completezza.
 
-cpu.py/ppu.py NON vengono modificati per questo - cpu.pxd/ppu.pxd
-(accanto a questo file) dicono al compilatore quali tipi C usare
-(registri per cpu.py, indici/contatori per ppu.py), senza toccare la
-logica. I file .py restano validi ed eseguibili anche senza mai
+fb_convert.py (conversione RGB888->RGB565 per --fbdev-renderer, vedi
+launcher.py) compilato per lo stesso motivo: MISURATO a ~4 secondi/
+frame in Python puro su Raspberry Pi 1 vero (150.000+ pixel/frame),
+completamente inutilizzabile senza compilarlo.
+
+cpu.py/ppu.py/fb_convert.py NON vengono modificati per questo -
+cpu.pxd/ppu.pxd/fb_convert.pxd (accanto a questo file) dicono al
+compilatore quali tipi C usare (registri per cpu.py, indici/contatori
+per ppu.py, un memoryview tipizzato per fb_convert.py), senza toccare
+la logica. I file .py restano validi ed eseguibili anche senza mai
 lanciare questo script (fallback naturale: se l'estensione compilata
 non esiste, Python usa semplicemente il .py cosi' com'e' - nessun
 codice di fallback esplicito necessario, e' il comportamento normale
@@ -73,6 +79,7 @@ def main():
     ext_modules = [
         Extension(name="cpu", sources=["cpu.py"]),
         Extension(name="ppu", sources=["ppu.py"]),
+        Extension(name="fb_convert", sources=["fb_convert.py"]),
     ]
     setup(
         ext_modules=cythonize(
@@ -85,14 +92,20 @@ def main():
                                          # cpu.py; in ppu.py sono solo oggetti
                                          # Python normali (bytearray/list), non
                                          # buffer/memoryview C - la direttiva
-                                         # non ha alcun effetto li'
-                "wraparound": False,    # nessun indice negativo usato in cpu.py/ppu.py
+                                         # non ha alcun effetto li'; in
+                                         # fb_convert.py invece SI applica
+                                         # davvero (frame_buf e' un memoryview
+                                         # tipizzato, vedi fb_convert.pxd) - il
+                                         # loop resta sempre dentro len(frame_buf)
+                                         # per costruzione (range(0, n, 3))
+                "wraparound": False,    # nessun indice negativo usato in cpu.py/ppu.py/fb_convert.py
                 "infer_types": True,    # tipizza automaticamente le variabili
                                          # locali dove il compilatore puo'
                                          # dedurlo con certezza (es. risultati
-                                         # intermedi in _add/_sub, o gli indici
-                                         # riga/colonna in ppu.py) - senza
-                                         # dover annotare i .py a mano
+                                         # intermedi in _add/_sub, gli indici
+                                         # riga/colonna in ppu.py, o r/g/b/p in
+                                         # fb_convert.py) - senza dover annotare
+                                         # i .py a mano
             },
             build_dir="build_cython_tmp",  # file .c intermedi - non i .so
                                             # finali, che restano accanto ai
@@ -103,8 +116,8 @@ def main():
         script_args=["build_ext", "--inplace"],
     )
     print()
-    print("Compilazione completata - cerca i file cpu.*.so e ppu.*.so in questa cartella.")
-    print("Verifica: python3 -c \"import cpu, ppu; print(cpu.__file__, ppu.__file__)\" deve mostrare .so per entrambi, non .py")
+    print("Compilazione completata - cerca i file cpu.*.so, ppu.*.so e fb_convert.*.so in questa cartella.")
+    print("Verifica: python3 -c \"import cpu, ppu, fb_convert; print(cpu.__file__, ppu.__file__, fb_convert.__file__)\" deve mostrare .so per tutti e tre, non .py")
 
 
 if __name__ == "__main__":

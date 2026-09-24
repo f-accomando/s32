@@ -28,6 +28,7 @@ from lang import compile_source as compile_consolelang
 from cpu import CPU
 import audio
 from ppu import render_frame, render_background, render_background_window, draw_sprites, iter_visible_sprite_tiles
+from fb_convert import rgb888_to_rgb565
 from memory_map import (
     VRAM_SIZE, OAM_SIZE, CGRAM_SIZE, VRAM_BASE, OAM_BASE, CGRAM_BASE,
     OAM_SLOT_BYTES, TILE_SIZE_PX, SCREEN_W_PX, SCREEN_H_PX,
@@ -1017,31 +1018,17 @@ class FramebufferRenderer:
     schermo, e' sostituito con questa scrittura diretta al device.
 
     Conversione RGB888->RGB565 (formato nativo di questo LCD, vedi
-    `fbset -fb /dev/fb1`): stesso bit-packing di un piccolo script
-    dell'utente che mostrava gia' un'immagine statica sull'LCD scrivendo
-    su questo stesso device (byte basso poi byte alto, little-endian).
-
-    ATTENZIONE PRESTAZIONI: qui il loop di conversione e' Python puro,
-    NON ancora tipizzato con Cython come cpu.py/ppu.py - su 480x320 =
-    153.600 pixel/frame potrebbe diventare il nuovo collo di bottiglia
-    su Pi 1. Verificare con --stats prima di ottimizzare (stessa
-    filosofia "misura, non indovinare" usata per cpu.py/ppu.py)."""
+    `fbset -fb /dev/fb1`) in fb_convert.py, compilato con Cython come
+    cpu.py/ppu.py (vedi quel modulo) - MISURATO su Raspberry Pi 1
+    vero in Python puro: ~4 SECONDI/frame (153.600 pixel/frame),
+    completamente inutilizzabile senza compilarlo."""
 
     def __init__(self, fb_path="/dev/fb1"):
         self.fb_path = fb_path
         self.fb = open(fb_path, "r+b")
 
     def render(self, frame_buf):
-        out = bytearray(len(frame_buf) // 3 * 2)
-        j = 0
-        for i in range(0, len(frame_buf), 3):
-            r = frame_buf[i]
-            g = frame_buf[i + 1]
-            b = frame_buf[i + 2]
-            p = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
-            out[j] = p & 0xff
-            out[j + 1] = (p >> 8) & 0xff
-            j += 2
+        out = rgb888_to_rgb565(frame_buf)
         self.fb.seek(0)
         self.fb.write(out)
         self.fb.flush()
