@@ -999,6 +999,30 @@ def _playtest_sequence(quick=False):
     return seq
 
 
+def _write_changed_rows(dst, out, prev, row_bytes, n_rows):
+    """Scrive in dst (supporta slice assignment - un mmap o un
+    bytearray normale, usato cosi' nei test senza bisogno di un vero
+    framebuffer) solo le righe di `out` diverse dalla riga
+    corrispondente in `prev`. out/prev hanno lo stesso layout
+    (row_bytes*n_rows byte totali, riga per riga). Se prev e' None
+    (primo frame, niente da confrontare), scrive tutto.
+
+    Ritorna il numero di righe effettivamente riscritte - usato dai
+    test per verificare che le righe invariate vengano davvero
+    saltate, non solo che il risultato finale sia corretto."""
+    if prev is None:
+        dst[0:len(out)] = out
+        return n_rows
+    written = 0
+    for y in range(n_rows):
+        start = y * row_bytes
+        end = start + row_bytes
+        if out[start:end] != prev[start:end]:
+            dst[start:end] = out[start:end]
+            written += 1
+    return written
+
+
 class FramebufferRenderer:
     """Quinto percorso di rendering (--fbdev-renderer): scrive
     render_background()+draw_sprites() DIRETTAMENTE su un framebuffer
@@ -1028,28 +1052,41 @@ class FramebufferRenderer:
     vero in Python puro: ~4 SECONDI/frame (153.600 pixel/frame),
     completamente inutilizzabile senza compilarlo.
 
-    SCRITTURA VIA mmap, NON write(): molti driver SPI per LCD piccoli
-    (framework 'fbtft', es. fb_ili9486 - identificato con l'utente via
-    dmesg: SPI a 16MHz, parametri fps=33/txbuflen=32768, la firma
-    tipica del deferred I/O di fbtft) spediscono i dati sul bus SPI in
-    un thread del KERNEL separato, innescato tracciando le pagine
-    "sporche" della memoria MAPPATA (mmap) - non degli scritture dirette
-    col syscall write(). Con write(), misurato ~200ms/frame bloccanti
-    (~1.5 MB/s, il limite fisico dell'SPI a 16MHz con l'overhead del
-    protocollo) - con mmap, la scrittura qui e' solo un memcpy in
-    memoria, il trasferimento SPI vero avviene in background al ritmo
-    che il driver decide (fps=33 in questo caso), fuori dal loop di
-    gioco."""
+    SCRITTURA VIA mmap: il driver (fb_ili9486, famiglia 'fbtft',
+    identificato con l'utente via dmesg - SPI a 16MHz, deferred I/O)
+    traccia le pagine "sporche" della memoria mappata per decidere
+    cosa spedire sul bus SPI. MISURATO pero' che passare da write() a
+    mmap() da solo NON riduce il tempo bloccante (restava ~200-500ms/
+    frame in entrambi i casi, anche dopo aver alzato la frequenza SPI
+    a 24MHz senza risultati e con artefatti visivi - tentativo
+    scartato) - il vincolo reale non e' la velocita' del canale ma il
+    NUMERO DI BYTE scritti ogni frame: un frame RGB565 intero sono
+    307.200 byte, e va spedito per intero anche quando lo sfondo non
+    e' cambiato affatto (tipico: solo pochi sprite si muovono).
+
+    DIFF RIGA PER RIGA (vedi render()): confronta il nuovo frame con
+    l'ultimo scritto e riscrive nel framebuffer SOLO le righe diverse
+    - se lo sfondo e' fermo e si muovono solo un paio di sprite, la
+    stragrande maggioranza delle 320 righe risultano identiche e
+    vengono saltate, riducendo proporzionalmente sia il lavoro fatto
+    qui sia (si spera, dato che il driver traccia le pagine toccate)
+    il traffico SPI reale. Durante lo scroll (quasi tutte le righe
+    cambiano comunque) il guadagno si riduce, ma non peggiora mai
+    rispetto a riscrivere sempre tutto."""
 
     def __init__(self, fb_path="/dev/fb1"):
         self.fb_path = fb_path
         self.fb = open(fb_path, "r+b")
         self._fb_size = SCREEN_W_PX * SCREEN_H_PX * 2  # RGB565, 2 byte/pixel
         self._mmap = mmap.mmap(self.fb.fileno(), self._fb_size)
+        self._prev_rgb565 = None  # ultimo frame scritto - None al primo
+                                   # frame, forza la scrittura intera
 
     def render(self, frame_buf):
         out = rgb888_to_rgb565(frame_buf)
-        self._mmap[0:len(out)] = out
+        row_bytes = SCREEN_W_PX * 2
+        _write_changed_rows(self._mmap, out, self._prev_rgb565, row_bytes, SCREEN_H_PX)
+        self._prev_rgb565 = out
 
     def close(self):
         self._mmap.close()
