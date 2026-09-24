@@ -1087,6 +1087,36 @@ finally:
     launcher.run_direct = _orig_run_direct_main
 
 # ---------------------------------------------------------------
+# _ticks_to_catch_up (timestep fisso per il gioco locale interattivo):
+# la velocita' di gioco non deve dipendere da quanto ci mette il
+# rendering - vedi _run_pygame_loop per il contesto (segnalato
+# dall'utente su --fbdev-renderer, ma il principio vale in generale).
+# ---------------------------------------------------------------
+from launcher import _ticks_to_catch_up
+
+TICK = 1.0 / 60
+
+n, resid = _ticks_to_catch_up(0.0, TICK, 5)
+check("_ticks_to_catch_up: nessun tempo accumulato -> zero tick", n, 0)
+check("_ticks_to_catch_up: nessun tempo accumulato -> accumulatore invariato", resid, 0.0)
+
+n, resid = _ticks_to_catch_up(TICK * 0.5, TICK, 5)
+check("_ticks_to_catch_up: meno di un tick accumulato -> zero tick", n, 0)
+check("_ticks_to_catch_up: il residuo non consumato resta nell'accumulatore", resid, TICK * 0.5)
+
+n, resid = _ticks_to_catch_up(TICK, TICK, 5)
+check("_ticks_to_catch_up: esattamente un tick -> un tick eseguito", n, 1)
+check("_ticks_to_catch_up: esattamente un tick -> accumulatore azzerato", abs(resid) < 1e-9, True)
+
+n, resid = _ticks_to_catch_up(TICK * 3, TICK, 5)
+check("_ticks_to_catch_up: rendering lento (3 tick di ritardo) -> RECUPERA i 3 tick, non solo 1", n, 3)
+
+n, resid = _ticks_to_catch_up(TICK * 100, TICK, 5)
+check("_ticks_to_catch_up: rendering bloccato a lungo -> tetto MAX_CATCHUP_TICKS, non 100 tick insieme", n, 5)
+check("_ticks_to_catch_up: oltre il tetto, il tempo in eccesso viene SCARTATO (niente spirale della morte)",
+      abs(resid - (TICK * 100 - 5 * TICK)) < 1e-9, True)
+
+# ---------------------------------------------------------------
 # _write_changed_rows (--fbdev-renderer): scrive solo le righe
 # diverse dal frame precedente, per ridurre i byte spediti sull'LCD
 # via SPI - vedi FramebufferRenderer per il contesto (misurato sul

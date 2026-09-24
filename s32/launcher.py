@@ -999,6 +999,24 @@ def _playtest_sequence(quick=False):
     return seq
 
 
+def _ticks_to_catch_up(accumulator, tick_dt, max_ticks):
+    """Timestep fisso per il loop di gioco locale interattivo (vedi
+    _run_pygame_loop): quanti tick di simulazione da tick_dt secondi
+    servono per "consumare" l'accumulatore di tempo reale trascorso,
+    con un tetto max_ticks - oltre quel tetto si accetta di perdere
+    tempo simulato invece di provare a recuperarlo tutto insieme
+    (evita una "spirale della morte" se il rendering si e' bloccato a
+    lungo, es. il primissimo frame). Funzione pura, separata dal
+    resto del loop apposta per essere testabile senza pygame/hardware.
+
+    Ritorna (numero_di_tick, accumulatore_residuo)."""
+    n = 0
+    while accumulator >= tick_dt and n < max_ticks:
+        accumulator -= tick_dt
+        n += 1
+    return n, accumulator
+
+
 def _write_changed_rows(dst, out, prev, row_bytes, n_rows):
     """Scrive in dst (supporta slice assignment - un mmap o un
     bytearray normale, usato cosi' nei test senza bisogno di un vero
@@ -1324,6 +1342,29 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
     # tutte le istanze andrebbero fuori sincronia). --
     frame_number = 0
 
+    # -- TIMESTEP FISSO per il gioco locale interattivo (non
+    # --playtest, non in rete - vedi il condizionale piu' sotto dove
+    # viene usato per il perche' di questa esclusione): senza questo,
+    # un rendering lento (segnalato dall'utente su --fbdev-renderer,
+    # ma il problema esiste per qualunque renderer) fa chiamare
+    # cpu.run() meno spesso, rallentando anche la LOGICA di gioco
+    # (il personaggio si muove piu' lento in tempo REALE, non solo
+    # in modo meno fluido) - la velocita' di gioco non deve dipendere
+    # da quanto ci mette il disegno a schermo. Ogni iterazione reale
+    # del loop misura quanto tempo e' passato e "recupera" quel tempo
+    # a passi fissi di TICK_DT, eseguendo cpu.run() una volta per
+    # passo prima del prossimo disegno - se il rendering e' stato
+    # lento, si eseguono piu' passi di fila. MAX_CATCHUP_TICKS evita
+    # una "spirale della morte" se il rendering si blocca a lungo
+    # (es. il primissimo frame): oltre quel tetto si accetta di
+    # perdere tempo simulato invece di provare a recuperarlo tutto
+    # insieme, cosa che rallenterebbe ulteriormente il frame
+    # successivo in un circolo vizioso.
+    TICK_DT = 1.0 / 60
+    MAX_CATCHUP_TICKS = 5
+    sim_accumulator = 0.0
+    sim_last_time = time.perf_counter()
+
     running = True
     quit_requested = False  # True SOLO se l'utente ha chiuso la finestra
                              # (pygame.QUIT) - ESC/fine partita fermano
@@ -1414,9 +1455,27 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
             extra_inputs = frame_inputs[1:]
 
         t0 = time.perf_counter()
-        n_istruzioni = cpu.run(CART_LOAD_ADDR, input_byte=input_byte, extra_inputs=extra_inputs)
+        if playtest_seq is None and netcode_session is None:
+            # locale interattivo: timestep fisso (vedi commento sopra
+            # TICK_DT). --playtest resta un tick per iterazione ESATTAMENTE
+            # come prima apposta - deve restare un benchmark del throughput
+            # reale del motore, non della velocita' "corretta" di gioco. La
+            # rete ha gia' la sua pacatura (get_frame_inputs/timeout) e un
+            # proprio vincolo di sincronia tra istanze - un recupero locale
+            # di tick qui rischierebbe di disallinearle, va lasciata invariata.
+            now = time.perf_counter()
+            frame_time = min(now - sim_last_time, TICK_DT * MAX_CATCHUP_TICKS)
+            sim_last_time = now
+            sim_accumulator += frame_time
+            ticks_done, sim_accumulator = _ticks_to_catch_up(sim_accumulator, TICK_DT, MAX_CATCHUP_TICKS)
+            n_istruzioni = 0
+            for _ in range(ticks_done):
+                n_istruzioni += cpu.run(CART_LOAD_ADDR, input_byte=input_byte, extra_inputs=extra_inputs)
+                frame_number += 1
+        else:
+            n_istruzioni = cpu.run(CART_LOAD_ADDR, input_byte=input_byte, extra_inputs=extra_inputs)
+            frame_number += 1
         t1 = time.perf_counter()
-        frame_number += 1
 
         # audio PRIMA del rendering: il disegno puo' costare decine di
         # ms su hardware lento (vedi --stats), e far aspettare un
