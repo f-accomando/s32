@@ -21,6 +21,7 @@ per la prima, questo file resta un sottile collante per la seconda).
 
 import sys
 import os
+import mmap
 import importlib.util
 
 from assembler import assemble
@@ -28,6 +29,7 @@ from lang import compile_source as compile_consolelang
 from cpu import CPU
 import audio
 from ppu import render_frame, render_background, render_background_window, draw_sprites, iter_visible_sprite_tiles
+from fb_convert import rgb888_to_rgb565
 from memory_map import (
     VRAM_SIZE, OAM_SIZE, CGRAM_SIZE, VRAM_BASE, OAM_BASE, CGRAM_BASE,
     OAM_SLOT_BYTES, TILE_SIZE_PX, SCREEN_W_PX, SCREEN_H_PX,
@@ -165,7 +167,7 @@ def _load_cart_graphics(cpu, cart_dir):
         cpu.sound_bank = module.build_sound_bank()
 
 
-def run_direct(path, kind, show_stats=False, quit_pygame_at_end=True, renderer_mode='dirty-rects', fullscreen=False, use_audio=False, playtest=False, playtest_quick=False, netcode_session=None, local_player_index=0):
+def run_direct(path, kind, show_stats=False, quit_pygame_at_end=True, renderer_mode='dirty-rects', fullscreen=False, use_audio=False, playtest=False, playtest_quick=False, netcode_session=None, local_player_index=0, fbdev_path=None):
     """Bypassa il menu, carica ed esegue direttamente la cartuccia
     data - stesso comportamento immediato della v1 (python3 main.py).
 
@@ -194,7 +196,8 @@ def run_direct(path, kind, show_stats=False, quit_pygame_at_end=True, renderer_m
     return _run_pygame_loop(cpu, show_stats=show_stats, quit_pygame_at_end=quit_pygame_at_end,
                              renderer_mode=renderer_mode, fullscreen=fullscreen,
                              use_audio=use_audio, playtest=playtest, playtest_quick=playtest_quick,
-                             netcode_session=netcode_session, local_player_index=local_player_index)
+                             netcode_session=netcode_session, local_player_index=local_player_index,
+                             fbdev_path=fbdev_path)
 
 
 def _init_pygame_once():
@@ -996,6 +999,153 @@ def _playtest_sequence(quick=False):
     return seq
 
 
+class FramebufferRenderer:
+    """Quinto percorso di rendering (--fbdev-renderer): scrive
+    render_background()+draw_sprites() DIRETTAMENTE su un framebuffer
+    Linux (es. /dev/fb1, un LCD collegato via GPIO), bypassando SDL
+    per l'OUTPUT VIDEO. Nato perche' su Raspberry Pi 1 con Pi OS Lite
+    headless nessun driver SDL2 reale e' disponibile: KMSDRM richiede
+    /dev/dri (il kernel di questo modello non lo espone - niente
+    supporto DRM/KMS), x11/wayland richiedono un server grafico in
+    esecuzione (nessuno, headless), fbcon/directfb non sono compilati
+    nelle build recenti di SDL2 (rimossi dal sorgente stesso, non solo
+    disabilitati). Risultato: SDL2 cade silenziosamente sul driver
+    'offscreen', che non disegna da nessuna parte - ne' su HDMI ne'
+    sull'LCD, senza nessun errore evidente.
+
+    pygame/SDL restano usati per audio (funziona anche col driver
+    'offscreen') e per l'input SOLO in modalita' --playtest (una
+    sequenza scriptata, non tastiera vera). Per il gioco interattivo
+    VERO, pygame.key.get_pressed() NON funziona qui: senza una
+    finestra SDL reale non c'e' mai focus, i tasti finiscono altrove
+    (es. il terminale SSH da cui e' stato lanciato il gioco) -
+    scoperto testando su hardware reale. Vedi EvdevKeyboard poco
+    sotto per come viene letta la tastiera in quel caso.
+
+    Conversione RGB888->RGB565 (formato nativo di questo LCD, vedi
+    `fbset -fb /dev/fb1`) in fb_convert.py, compilato con Cython come
+    cpu.py/ppu.py (vedi quel modulo) - MISURATO su Raspberry Pi 1
+    vero in Python puro: ~4 SECONDI/frame (153.600 pixel/frame),
+    completamente inutilizzabile senza compilarlo.
+
+    SCRITTURA VIA mmap, NON write(): molti driver SPI per LCD piccoli
+    (framework 'fbtft', es. fb_ili9486 - identificato con l'utente via
+    dmesg: SPI a 16MHz, parametri fps=33/txbuflen=32768, la firma
+    tipica del deferred I/O di fbtft) spediscono i dati sul bus SPI in
+    un thread del KERNEL separato, innescato tracciando le pagine
+    "sporche" della memoria MAPPATA (mmap) - non degli scritture dirette
+    col syscall write(). Con write(), misurato ~200ms/frame bloccanti
+    (~1.5 MB/s, il limite fisico dell'SPI a 16MHz con l'overhead del
+    protocollo) - con mmap, la scrittura qui e' solo un memcpy in
+    memoria, il trasferimento SPI vero avviene in background al ritmo
+    che il driver decide (fps=33 in questo caso), fuori dal loop di
+    gioco."""
+
+    def __init__(self, fb_path="/dev/fb1"):
+        self.fb_path = fb_path
+        self.fb = open(fb_path, "r+b")
+        self._fb_size = SCREEN_W_PX * SCREEN_H_PX * 2  # RGB565, 2 byte/pixel
+        self._mmap = mmap.mmap(self.fb.fileno(), self._fb_size)
+
+    def render(self, frame_buf):
+        out = rgb888_to_rgb565(frame_buf)
+        self._mmap[0:len(out)] = out
+
+    def close(self):
+        self._mmap.close()
+        self.fb.close()
+
+
+class EvdevKeyboard:
+    """Lettura tastiera diretta da /dev/input/eventX (libreria
+    'evdev'), usata SOLO con --fbdev-renderer in modalita'
+    INTERATTIVA (non --playtest/--playtest-quick, che usano una
+    sequenza scriptata e non hanno bisogno di una tastiera vera).
+
+    Perche' non pygame.key.get_pressed(): senza una finestra SDL reale
+    (vedi FramebufferRenderer) non c'e' mai focus, quindi SDL non
+    riceve mai gli eventi tastiera - scoperto testando su hardware
+    reale (i tasti finivano nel terminale SSH da cui era stato
+    lanciato il gioco). Stesso principio gia' applicato al video:
+    bypassare SDL dove SDL non funziona su questo hardware.
+
+    device.grab() prende il device in ESCLUSIVA: come effetto
+    collaterale utile, impedisce ANCHE che i tasti finiscano nel
+    terminale (risolve il sintomo originale, non solo la causa) - se
+    il processo termina in modo anomalo il grab si rilascia comunque
+    da solo (e' legato al file descriptor, chiuso automaticamente
+    dal kernel all'uscita del processo)."""
+
+    def __init__(self):
+        try:
+            import evdev
+        except ImportError:
+            raise LauncherError(
+                "--fbdev-renderer in modalita' interattiva richiede la libreria 'evdev' per "
+                "leggere la tastiera senza una finestra SDL vera (pip3 install evdev "
+                "--break-system-packages), oppure usa --playtest/--playtest-quick che non "
+                "ha bisogno di una tastiera reale."
+            )
+        self._evdev = evdev
+        device_path = None
+        for path in evdev.list_devices():
+            dev = evdev.InputDevice(path)
+            caps = dev.capabilities().get(evdev.ecodes.EV_KEY, [])
+            if evdev.ecodes.KEY_A in caps:  # trucco comune per distinguere
+                                              # una tastiera vera da un
+                                              # mouse/joystick (niente tasti
+                                              # lettera tra le sue capability)
+                device_path = path
+                break
+            dev.close()
+        if device_path is None:
+            raise LauncherError(
+                "--fbdev-renderer in modalita' interattiva: nessuna tastiera trovata tra i "
+                "device /dev/input/event* - collega una tastiera USB, oppure usa "
+                "--playtest/--playtest-quick che non ha bisogno di una tastiera reale."
+            )
+        self.device = evdev.InputDevice(device_path)
+        self.device.grab()
+        self._pressed = set()
+
+    def poll(self):
+        """Da chiamare una volta per frame: svuota (senza bloccare) la
+        coda di eventi pendenti e aggiorna l'insieme dei tasti premuti
+        in questo istante."""
+        ecodes = self._evdev.ecodes
+        try:
+            for event in self.device.read():
+                if event.type == ecodes.EV_KEY:
+                    if event.value == 1:      # tasto premuto
+                        self._pressed.add(event.code)
+                    elif event.value == 0:    # tasto rilasciato
+                        self._pressed.discard(event.code)
+        except BlockingIOError:
+            pass  # nessun evento pendente in questo frame, normale
+
+    def input_byte(self):
+        """Stessa mappatura di tasti/bit di _run_pygame_loop per
+        pygame.key.get_pressed() (frecce o WASD, J o SPAZIO)."""
+        ecodes = self._evdev.ecodes
+        b = 0
+        if ecodes.KEY_UP in self._pressed or ecodes.KEY_W in self._pressed: b |= 0x01
+        if ecodes.KEY_DOWN in self._pressed or ecodes.KEY_S in self._pressed: b |= 0x02
+        if ecodes.KEY_LEFT in self._pressed or ecodes.KEY_A in self._pressed: b |= 0x04
+        if ecodes.KEY_RIGHT in self._pressed or ecodes.KEY_D in self._pressed: b |= 0x08
+        if ecodes.KEY_J in self._pressed or ecodes.KEY_SPACE in self._pressed: b |= 0x10
+        return b
+
+    def should_quit(self):
+        return self._evdev.ecodes.KEY_ESC in self._pressed
+
+    def close(self):
+        try:
+            self.device.ungrab()
+        except OSError:
+            pass  # gia' rilasciato o device sparito - non fatale in chiusura
+        self.device.close()
+
+
 def _pixels_to_surface(pixels, w, h):
     """render_frame() ora ritorna gia' un buffer piatto RGB (bytearray)
     - frombuffer() lo impacchetta in una Surface con un'unica
@@ -1006,7 +1156,7 @@ def _pixels_to_surface(pixels, w, h):
     return pygame.image.frombuffer(bytes(pixels), (w, h), 'RGB')
 
 
-def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mode='dirty-rects', fullscreen=False, use_audio=False, playtest=False, playtest_quick=False, netcode_session=None, local_player_index=0):
+def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mode='dirty-rects', fullscreen=False, use_audio=False, playtest=False, playtest_quick=False, netcode_session=None, local_player_index=0, fbdev_path=None):
     """Il ciclo CPU->PPU->schermo a 60fps. show_stats=True stampa in
     console fps/tempo cpu/tempo render (disegno+blit insieme, vedi
     sotto) ogni secondo, utile per misurare le prestazioni su
@@ -1033,6 +1183,11 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
         blit()/frame con overhead fisso ciascuna, e SRCALPHA ha un
         costo di compositing che SDL software non ammortizza.
         Lasciato dietro flag per chi ha un driver video accelerato.
+      'fbdev' (flag --fbdev-renderer, opzionale --fbdev-path) -
+        FramebufferRenderer: scrive direttamente su un framebuffer
+        Linux (default /dev/fb1), bypassando SDL per l'output video -
+        vedi quella classe per il perche' (nessun driver SDL2 reale
+        disponibile su alcuni Raspberry Pi headless).
 
     Perche' dirty-rects batte surface nettamente pur usando anch'esso
     blit() per gli sprite: il numero di chiamate blit()/frame e' la
@@ -1076,6 +1231,11 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
     surface_renderer = SurfaceRenderer(pygame) if renderer_mode == 'surface' else None
     incremental_renderer = IncrementalRenderer(pygame) if renderer_mode == 'dirty-rects' else None
     gpu_renderer = GpuRenderer(pygame, gpu_sdl_renderer) if renderer_mode == 'gpu' else None
+    fbdev_renderer = FramebufferRenderer(fbdev_path or "/dev/fb1") if renderer_mode == 'fbdev' else None
+    # EvdevKeyboard SOLO in modalita' interattiva (non --playtest, che
+    # ha gia' la propria sequenza scriptata e non tocca mai la
+    # tastiera vera) - vedi quella classe per il perche' serve qui.
+    evdev_keyboard = EvdevKeyboard() if (renderer_mode == 'fbdev' and not playtest) else None
     audio_player = AudioPlayer(pygame, use_audio, sound_bank=getattr(cpu, 'sound_bank', None))
 
     # cache dello sfondo (percorso 'buffer'): ricalcolato SOLO quando
@@ -1147,6 +1307,11 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
                 break
             current_phase, input_byte = playtest_seq[playtest_i]
             playtest_i += 1
+        elif evdev_keyboard is not None:
+            evdev_keyboard.poll()
+            input_byte = evdev_keyboard.input_byte()
+            if evdev_keyboard.should_quit():
+                running = False
         else:
             keys = pygame.key.get_pressed()
             input_byte = 0
@@ -1236,6 +1401,19 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
                                          cpu.scroll_x, cpu.scroll_y)
             # NON chiama flip() qui: IncrementalRenderer aggiorna gia'
             # da solo, in modo parziale, con pygame.display.update()
+        elif fbdev_renderer is not None:
+            cache_key = (cpu.current_stage, cpu.scroll_x, cpu.scroll_y)
+            if bg_cache_key != cache_key:
+                bg_cache_buf = render_background(vram, cgram, cpu.scroll_x, cpu.scroll_y,
+                                                   blob_cache=tile_blob_cache)
+                bg_cache_key = cache_key
+            frame_buf = bytearray(bg_cache_buf)
+            draw_sprites(frame_buf, oam, cgram, vram)
+            fbdev_renderer.render(frame_buf)
+            # NON chiama pygame.display.flip(): l'output va al
+            # framebuffer del device, non alla finestra SDL (che qui
+            # non disegna comunque nulla di visibile, vedi
+            # FramebufferRenderer)
         else:
             if surface_renderer is not None:
                 surface_renderer.render(screen, vram, oam, cgram, cpu.current_stage,
@@ -1312,6 +1490,12 @@ def _run_pygame_loop(cpu, show_stats=False, quit_pygame_at_end=True, renderer_mo
     if playtest_seq is not None:
         _print_playtest_summary(phase_stats, renderer_mode,
                                  time.perf_counter() - playtest_t_start)
+
+    if fbdev_renderer is not None:
+        fbdev_renderer.close()
+
+    if evdev_keyboard is not None:
+        evdev_keyboard.close()
 
     if quit_pygame_at_end:
         pygame.quit()
@@ -1545,11 +1729,17 @@ def run_benchmark(path, kind, n_frames=120, profile=False):
 def parse_flags(argv):
     """Estrae i flag di prestazioni (--stats, --benchmark,
     --benchmark-frames, --profile, --surface-renderer,
-    --buffer-renderer, --gpu-renderer, --fullscreen, --no-audio,
-    --playtest, --playtest-quick, --netplay-host, --netplay-join) da
-    argv, ritornando (argv_ripulito, dict_flag) - separato da
-    determine_mode() apposta, per restare entrambi testabili
-    singolarmente.
+    --buffer-renderer, --gpu-renderer, --fbdev-renderer, --fbdev-path,
+    --fullscreen, --no-audio, --playtest, --playtest-quick,
+    --netplay-host, --netplay-join) da argv, ritornando
+    (argv_ripulito, dict_flag) - separato da determine_mode() apposta,
+    per restare entrambi testabili singolarmente.
+
+    --fbdev-renderer scrive direttamente su un framebuffer Linux
+    invece di usare SDL per l'output video (vedi FramebufferRenderer) -
+    utile quando nessun driver SDL2 reale e' disponibile (es. Pi 1
+    headless senza /dev/dri). --fbdev-path <path> cambia il device di
+    default (/dev/fb1).
 
     --benchmark-frames <N> cambia quanti frame misura --benchmark
     (default 120, vedi run_benchmark()) - serve per confrontare
@@ -1579,6 +1769,7 @@ def parse_flags(argv):
     fuori dal kit di rete originale apposta ("meglio scriverlo voi
     seguendo lo stile esistente"), aggiunti qui."""
     flags = {'stats': False, 'benchmark': False, 'benchmark_frames': None, 'profile': False, 'renderer': 'dirty-rects', 'fullscreen': False, 'audio': True, 'playtest': False, 'playtest_quick': False,
+              'fbdev_path': None,
               'netplay_host_port': None, 'netplay_host_players': None, 'netplay_join_addr': None}
     rest = []
     i = 0
@@ -1607,6 +1798,13 @@ def parse_flags(argv):
             flags['renderer'] = 'buffer'
         elif arg == '--gpu-renderer':
             flags['renderer'] = 'gpu'
+        elif arg == '--fbdev-renderer':
+            flags['renderer'] = 'fbdev'
+        elif arg == '--fbdev-path':
+            if i + 1 >= len(argv):
+                raise LauncherError('--fbdev-path richiede un argomento: <path>, es. /dev/fb1')
+            flags['fbdev_path'] = argv[i+1]
+            i += 1
         elif arg == '--fullscreen':
             flags['fullscreen'] = True
         elif arg == '--audio':
@@ -1680,7 +1878,8 @@ def main():
             run_direct(path, kind, show_stats=flags['stats'], renderer_mode=flags['renderer'],
                        fullscreen=flags['fullscreen'], use_audio=flags['audio'], playtest=flags['playtest'],
                        playtest_quick=flags['playtest_quick'],
-                       netcode_session=netcode_session, local_player_index=local_player_index)
+                       netcode_session=netcode_session, local_player_index=local_player_index,
+                       fbdev_path=flags['fbdev_path'])
 
 
 if __name__ == '__main__':
